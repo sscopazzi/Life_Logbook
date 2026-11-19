@@ -37,7 +37,7 @@ Every name, place, vendor and category box suggests as you type: "ada" and Tab f
 | **Reports** | Pick any date range. Charts of net worth, what you have, what's owed, spending by category and month, work orders, and how long the box was on and off. Save as a PDF file (no print dialog) or export CSV. |
 | **Weather** | Inside and outside temperature and humidity from small wireless sensor nodes (ESP-NOW), which you can rename. Gaps stay gaps; nothing is filled in. |
 | **Map** | Where the box has been while it had a GPS fix, each day (midnight to midnight, in the box's time zone) as its own layer, over a street, satellite or topo map. Saved spots: press the knob on the box's MAP screen to save where you are, or add them here, with notes, pin types, colours and lists; import your Google Maps places (Takeout, My Maps KML). Export GPX and KML. |
-| **Settings** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, saved lists, storage, dashboard display (light or dark mode), routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. Each card stays folded until you tap it. |
+| **Settings** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, saved lists, storage, dashboard display (light or dark mode), routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. Drag to put tabs, screens and lines in order. |
 
 ### Money, the way a spreadsheet does it
 
@@ -47,7 +47,7 @@ Every name, place, vendor and category box suggests as you type: "ada" and Tab f
 ## The physical box
 
 - **Controller:** Adafruit ESP32-S2 Feather.
-- **Screen:** 128×128 grayscale OLED (Adafruit 4741). Its screens, in the order you choose: LOGBOOK (your pick of time, Wi-Fi, GPS, battery and time left, box temperature, climate…, plus timers and expiring documents), CHECKLIST, TODAY, NOTES, WORK ORDERS, MAP (speed, distance, position in your units and format) and JOIN. A highlighted line too long for the screen slides sideways so you can read it.
+- **Screen:** 128×128 grayscale OLED (Adafruit 4741). Its screens, in the order you choose: LOGBOOK (your pick of time, Wi-Fi, GPS, battery and time left, box temperature, climate…, plus timers and expiring documents), CHECKLIST, TODAY, NOTES, WORK ORDERS, MAP (speed, distance, position in your units and format), CARD (your business card with logo, to hold up when someone asks for your details) and JOIN. A highlighted line too long for the screen slides sideways so you can read it.
 - **Controls:**
   - a clicking rotary knob (Adafruit 5880) that moves one row per click; a press ticks the highlighted checklist item, opens a note or work order, or saves a spot on MAP; holding it turns the screen off;
   - a lit button to change screens and silence alarms. Its light glows dim while the screen sleeps.

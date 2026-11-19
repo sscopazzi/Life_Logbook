@@ -1241,10 +1241,12 @@ const uint16_t BUZ_HZ = 2650;                     // the piezo's loudest note
 const uint16_t HOLD_MS = 600;
 const int ROWS = 13;                              // text rows under the title bar
 
-enum { S_STATUS, S_CL, S_TODAY, S_NOTES, S_TRIP, S_JOIN, S_WO, S_COUNT };
-const char* SCR_KEY[] = { "status", "cl", "today", "notes", "map", "join", "wo" };   // names in the dashboard's list
-uint8_t scrOrd[S_COUNT] = { S_STATUS, S_CL, S_TODAY, S_TRIP, S_JOIN };   // until the dashboard says otherwise
-int scrN = 5;
+enum { S_STATUS, S_CL, S_TODAY, S_NOTES, S_TRIP, S_JOIN, S_WO, S_CARD, S_COUNT };
+const char* SCR_KEY[] = { "status", "cl", "today", "notes", "map", "join", "wo", "card" };   // names in the dashboard's list
+uint8_t scrOrd[S_COUNT] = { S_STATUS, S_CL, S_TODAY, S_NOTES, S_WO, S_TRIP, S_JOIN };   // until the dashboard says otherwise
+int scrN = 7;
+std::vector<String> cardLines;                           // CARD: your business card, already fitted to 21 characters
+std::vector<uint8_t> cardLogo; int cardLogoW = 0, cardLogoH = 0;   // its logo, 4-bit grey, two pixels a byte
 std::vector<String> lbKeys, mapKeys;                     // the lines on LOGBOOK and MAP (empty: the usual ones)
 String fSpd = "mph", fDist = "mi", fPos = "dd", fTemp = "F";
 uint32_t mqT0 = 0; bool mqOn = false;                     // the sliding (marquee) highlighted line
@@ -1413,7 +1415,17 @@ void todayLoad() {
     for (const char* k : doc["scr"].as<JsonArray>()) for (int i = 0; i < S_COUNT && n < S_COUNT; i++) if (k && !strcmp(k, SCR_KEY[i])) scrOrd[n++] = i;
     if (n) scrN = n;
   }
-  lbKeys.clear(); mapKeys.clear(); boxWos.clear();
+  lbKeys.clear(); mapKeys.clear(); boxWos.clear(); cardLines.clear(); cardLogo.clear(); cardLogoW = cardLogoH = 0;
+  JsonArray cl = doc["card"]["lines"];
+  for (JsonVariant l : cl) if (cardLines.size() < 12) cardLines.push_back(fit(ascii(l | ""), 21));
+  if (doc["card"]["logo"].is<JsonArray>()) {
+    int w = doc["card"]["logo"][0] | 0, h = doc["card"]["logo"][1] | 0; const char* hx = doc["card"]["logo"][2] | "";
+    if (w > 0 && w <= 128 && h > 0 && h <= 64 && (int)strlen(hx) == w * h) {
+      cardLogo.reserve(w * h / 2);
+      for (int i = 0; i + 1 < w * h; i += 2) { char b[3] = { hx[i], hx[i + 1], 0 }; cardLogo.push_back((uint8_t)strtoul(b, nullptr, 16)); }
+      cardLogoW = w; cardLogoH = h;
+    }
+  }
   for (const char* k : doc["lb"].as<JsonArray>()) if (lbKeys.size() < 12) lbKeys.push_back(k ? k : "-");
   for (const char* k : doc["map"].as<JsonArray>()) if (mapKeys.size() < 13) mapKeys.push_back(k ? k : "-");
   fSpd = doc["fmt"]["spd"] | "mph"; fDist = doc["fmt"]["dist"] | "mi"; fPos = doc["fmt"]["pos"] | "dd"; fTemp = doc["fmt"]["temp"] | "F";
@@ -1783,6 +1795,25 @@ void drawScreen() {
     static const char* MP0[] = { "spd", "dist", "fix", "spots", "lat", "lon", "sats" };
     int nM = mapKeys.size() ? (int)mapKeys.size() : 7;
     for (int i = 0; i < nM; i++) { uint16_t c; String l = mapLine(mapKeys.size() ? mapKeys[i] : String(MP0[i]), c); row(i, l, false, c); }
+  } else if (scr == S_CARD) {
+    todayLoad();
+    if (!cardLines.size()) { head("CARD"); row(1, "No business card yet"); row(2, "Settings > Business", false, C_DIM); row(3, "on the dashboard", false, C_DIM); }
+    else {
+      int y = 2;
+      if (cardLogoW) {   // the logo, centred
+        int x0 = (128 - cardLogoW) / 2;
+        for (int j = 0; j < cardLogoH; j++) for (int i = 0; i < cardLogoW; i++) {
+          uint8_t b = cardLogo[(j * cardLogoW + i) / 2], v = (i & 1) ? (b & 15) : (b >> 4);
+          if (v) oled.drawPixel(x0 + i, y + j, v);
+        }
+        y += cardLogoH + 4;
+      }
+      int room = (128 - y) / 9;
+      for (int i = 0; i < (int)cardLines.size() && i < room; i++) {
+        const String& l = cardLines[i];
+        oled.setCursor((128 - (int)l.length() * 6) / 2, y + i * 9); oled.setTextColor(C_ON); oled.print(l);
+      }
+    }
   } else if (scr == S_WO) {
     todayLoad();
     if (woOpen >= (int)boxWos.size()) woOpen = -1;
