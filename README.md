@@ -1,27 +1,30 @@
 # Logbook
-
-## ▶ Try the demo: **[sscopazzi.github.io/Life_Logbook/logbook-demo.html](https://sscopazzi.github.io/Life_Logbook/logbook-demo.html)**
-
-No hardware, no sign-up. The demo runs in your browser with made-up data, and your changes stay in that browser.
+### ▶ [Try the system demo](https://sscopazzi.github.io/Life_Logbook/logbook-demo.html)
+The demo requires no hardware and no sign-up. It runs in your browser with auto-filled made-up data and any changes you make stay in that browser.
 
 ---
 
-**Logbook is a small physical box that keeps your house, your work orders and your money in order, and it keeps all of it to itself.**
+### ▶ [Buy the system here](https://aspectwave.io/)
 
-The demo above is a website so you can try it. The real Logbook is not a website. It is a battery-powered box with its own screen, a knob and a button. It makes its own Wi-Fi hotspot and serves its dashboard to your phone or laptop over that hotspot.
+Everything I design and sell is **100% open source**; this means, if you would like, you can order the parts yourself and build your own! If you would instead prefer to purchase a ready-built system, you can do so from my website above.
 
-- **Standalone.** No account, no cloud, no app, no subscription and no outside servers. Everything is stored on the box and its SD card. It works with no internet at all.
-- **Private.** On its own hotspot, nobody can see your data without the hotspot password. On your home Wi-Fi (http://logbook.local) it asks for the box password you choose when you set it up, with a "remember this device" option.
-- **Portable.** Built for life on rotation: take it to sea, bring it home, and it picks up where it left off.
+---
+
+### The Logbook is a small physical box that keeps your daily checklist, work orders, calendar, location track, and money organized and logged. And it keeps all of it completely to itself with zero outside access to your data.
+
+The demo above is a website so you can try it. The real Logbook is not a website. It is a battery-powered box with its own screen, a knob and a button. It makes its own Wi-Fi hotspot and serves its dashboard to your phone or laptop over that hotspot (or by passthrough with your home Wi-Fi).
+
+- **Standalone.** No account, no cloud, no app, no subscription and no outside servers. Everything is stored on the box and its SD card. It works with no internet at all. Backup feature to export all your data so you can safely restore after loss.
+- **Private.** Nobody can see your data unless you give them the device's password and let them connect.
+- **Portable.** Built for life on the go: take it to sea, on vacation, bring it home, to work, and it picks up where it left off.
 
 If you give the box your home Wi-Fi, it uses that only to set its clock and to be reachable at http://logbook.local when it's in range of your Wi-Fi, so you don't have to connect directly to the box when you're at home. The only outside requests are the map tiles on the Map tab (street, satellite or topo). Your own phone or laptop fetches them when that device has internet; without internet, the track and your saved spots are drawn on a plain grid.
 
-## What it does
+## Tabs on the Dashboard
 
 | | |
 |---|---|
-| **Work Orders** | Overdue, due-soon, open and recently finished work orders, with reminders for bills, credit cards, rent, expiring documents, low stock and backups. |
-| **Work orders** | One-off, routine and business jobs, each with description, steps, findings, previous findings, parts and cost, people and time, attachments, and a full log. Tick "show on the box" and it's listed on the box's screen until it's closed. |
+| **Work Orders** | Overdue, due-soon, open and recently finished work orders, with reminders for bills, credit cards, rent, expiring documents, low stock and backups. One-off, routine and business jobs, each with description, steps, findings, previous findings, parts and cost, people and time, attachments, and a full log. Tick "show on the box" and it's listed on the box's screen until it's closed. |
 | **Jobs** | For paid work: **clients**, **proposals** (a paragraph about the work, steps priced flat or as rate × hours, terms, an optional deposit), **invoices** (lines, tax, discount, payments, paid deposits credited automatically) and the **jobs** themselves with their steps. Proposal → deposit → work order → invoice, or straight from an invoice to a work order and back. Numbers use your business's short code (AB-P1, AB-I1, AB-J1, business work orders AB-1). Save any proposal or invoice as a PDF or Word file, with your logo and details, no print dialog. |
 | **Daily checklist** | Nested items you can drag to reorder. Ticking an item ticks everything under it, on the web page and on the box. Items can link to work-order steps. Archive a day, then rename, edit or delete it later. |
 | **Notes** | Anything worth keeping. Buttons for bold, headings, lists and tick boxes. Pin notes to the top, tick "box" to read a note on the box's own screen, color-code their borders, and put `#word` or `#[two words]` anywhere in a note to file it under a category. Link a note to a work order, routine, asset or calendar event and it shows there too; set a reminder and it shows on Work Orders and the calendar; send its lines to today's checklist. Archive old notes and search them later, go back to an earlier version, or save a note as a Word or PDF file. |
@@ -36,7 +39,7 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 
 ### Money, the way a spreadsheet does it
 
-- **Balances:** set up your accounts and credit cards with your own names. Whenever you like, type what each account shows. Logbook adds up the accounts you tick, takes off money you've set aside (a buffer, money you're holding for someone) and what you owe on cards, and gives you **Available**.
+- **Balances:** set up your accounts and credit cards with your own names. Whenever you like, type what each account shows. Logbook adds up the accounts you tick, takes off money you've set aside (a buffer, money you're holding for someone) and what you owe on any credit cards, and gives you **Available**.
 - **Projection:** carries Available forward month by month. Bills, subscriptions, rent and loan payment plans fill in on the 1st of each month. Add your own lines, including pay by the day (rate × days). Green is money in, red is money out, blue is money to savings, and every amount shows its + or − sign.
 
 ## The physical box
@@ -46,14 +49,18 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 - **Controls:**
   - a clicking rotary knob (Adafruit 5880) that moves one row per click; a press ticks the highlighted checklist item, opens a note or work order, or saves a spot on MAP; holding it turns the screen off;
   - a lit button to change screens and silence alarms. Its light glows dim while the screen sleeps.
-- **Buzzer:** a piezo (Adafruit 1739) for kitchen timers, "find my box", and a BNWAS-style move reminder that sounds every few minutes until you walk over and press the button.
+- **Buzzer:** a piezo (Adafruit 1739) for kitchen timers, "find my box", and a BNWAS-style move reminder that sounds every few minutes until you walk over and press the button (put it in the other room and force yourself to stand up and walk every x minutes).
 - **Also inside:** GPS, a real-time clock and an SD card, all running on battery.
 
 ## Updating a box
 
-Updates are a single `.lbk` file, holding the dashboard and the firmware together. Upload it in **Setup › Firmware** with the box password; the box restarts and the page reloads.
+Updates are a single `.lbk` file (the dashboard and the firmware together). Upload it in **Setup › Firmware** with the box password; the box restarts and the page reloads.
+
+**All future firmware updates are 100% free** and will be released on this GitHub page.
 
 ## Building from source
+
+I am in the process of finishing the build manual. Please check back, or contact me via my website below/above.
 
 - **Arduino ESP32 core:** 3.3.x
 - **Board:** `esp32:esp32:adafruit_feather_esp32s2`
@@ -63,4 +70,4 @@ Nothing personal is compiled in. A new box starts with a public hotspot ("Logboo
 
 ---
 
-Made by Aspect Wave LLC.
+Made by Aspect Wave LLC - [Website](https://aspectwave.io/)
