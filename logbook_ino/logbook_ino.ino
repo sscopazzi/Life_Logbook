@@ -39,6 +39,8 @@
     rewritten on each change, so typing and checking never grow the work-order log. Archived days are
     /hwo/cl/YYYY-MM-DD.json, their search index one file a month /hwo/cx/YYYY-MM.json (the dashboard
     keeps it up to date), and imported calendars /hwo/ics/<id>.json, on the SD card when there is one.
+    Notes: /hwo/nt/0.json (categories) and /hwo/nt/1.json … (notes packed into files under 32 kB), in
+    flash with a copy on the card; archived notes /hwo/na/1.json … on the card (flash without one).
 
   EEPROM: a once-a-minute "still on" heartbeat, rotated across 240 slots for wear. After a
     power-on the box knows when it was switched off and logs the off period.
@@ -375,6 +377,8 @@ void ensureDirs(fs::FS& fs) {
   if (!fs.exists("/hwo/cl")) fs.mkdir("/hwo/cl");
   if (!fs.exists("/hwo/cx")) fs.mkdir("/hwo/cx");
   if (!fs.exists("/hwo/ics")) fs.mkdir("/hwo/ics");
+  if (!fs.exists("/hwo/nt")) fs.mkdir("/hwo/nt");
+  if (!fs.exists("/hwo/na")) fs.mkdir("/hwo/na");
   if (!fs.exists("/gps")) fs.mkdir("/gps");
 }
 
@@ -407,6 +411,22 @@ void moveDirToSd(const char* dir, bool append) {
   }
 }
 
+// file names (not paths) in one folder
+int listNames(fs::FS& fs, const char* dir, String* names, int max) {
+  File d = fs.open(dir); if (!d) return 0;
+  int n = 0; File e = d.openNextFile();
+  while (e && n < max) { String nm = e.name(); int sl = nm.lastIndexOf('/'); if (sl >= 0) nm = nm.substring(sl + 1); bool dirE = e.isDirectory(); e.close(); if (!dirE && nm.endsWith(".json")) names[n++] = nm; e = d.openNextFile(); }
+  if (e) e.close();
+  d.close();
+  return n;
+}
+void syncNotes() {
+  static String nf[48], ns[48];
+  int a = listNames(LittleFS, "/hwo/nt", nf, 48);
+  if (a == 0) { int b = listNames(SD, "/hwo/nt", ns, 48); for (int i = 0; i < b; i++) copyFile(SD, LittleFS, (String("/hwo/nt/") + ns[i]).c_str()); }
+  else { if (!SD.exists("/hwo/nt")) SD.mkdir("/hwo/nt"); for (int i = 0; i < a; i++) copyFile(LittleFS, SD, (String("/hwo/nt/") + nf[i]).c_str()); }
+}
+
 // Card just mounted: make flash and card agree
 void syncSdMirror() {
   if (!flashOK || !sdOK) return;
@@ -421,8 +441,10 @@ void syncSdMirror() {
   const char* CLP = "/hwo/doc/checklist.json";
   if (!LittleFS.exists(CLP) && SD.exists(CLP)) copyFile(SD, LittleFS, CLP);
   else if (LittleFS.exists(CLP)) copyFile(LittleFS, SD, CLP);
+  syncNotes();
   // files kept in flash while there was no card: move them to the card
   moveDirToSd("/hwo/cl", false);
+  moveDirToSd("/hwo/na", false);
   moveDirToSd("/hwo/ics", false);
   moveDirToSd("/gps", true);       // a day's track may already be on the card: append
 }
@@ -2026,21 +2048,27 @@ bool validCxName(const String& n) {   // archive search index: cx/YYYY-MM or cx/
   for (size_t i = 3; i < n.length(); i++) if (!isdigit((unsigned char)n[i]) && n[i] != '-') return false;
   return true;
 }
+bool validNoteName(const String& n) {   // notes nt/0 … nt/9999, archived notes na/1 … na/9999
+  if (!(n.startsWith("nt/") || n.startsWith("na/")) || n.length() < 4 || n.length() > 7) return false;
+  for (size_t i = 3; i < n.length(); i++) if (!isdigit((unsigned char)n[i])) return false;
+  return true;
+}
 bool validDocName(const String& n) {
   if (n == "checklist" || n == "oled") return true;
-  if (validIcsName(n) || validCxName(n)) return true;
+  if (validIcsName(n) || validCxName(n) || validNoteName(n)) return true;
   if (!n.startsWith("cl/") || n.length() < 13 || n.length() > 17) return false;
   for (size_t i = 3; i < n.length(); i++) if (!isdigit((unsigned char)n[i]) && n[i] != '-') return false;
   return true;
 }
-String docPath(const String& n) { return n == "checklist" ? String("/hwo/doc/checklist.json") : n == "oled" ? String("/hwo/doc/oled.json") : "/hwo/" + n + ".json"; }  // cl/<day>, cx/<month>, ics/<id>
+String docPath(const String& n) { return n == "checklist" ? String("/hwo/doc/checklist.json") : n == "oled" ? String("/hwo/doc/oled.json") : "/hwo/" + n + ".json"; }  // cl/<day>, cx/<month>, ics/<id>, nt/<k>, na/<k>
+bool flashFirst(const String& n) { return n == "checklist" || n == "oled" || n.startsWith("nt/"); }   // kept in flash, copied to the card
 
 void handleDocGet() {
   String n = server.arg("n");
   if (!validDocName(n)) { sendErr(400, "Bad document name"); return; }
   String p = docPath(n);
   fs::FS* fs = nullptr;
-  if (n == "checklist" || n == "oled") { if (flashOK && LittleFS.exists(p)) fs = &LittleFS; else if (sdOK && SD.exists(p)) fs = &SD; }
+  if (flashFirst(n)) { if (flashOK && LittleFS.exists(p)) fs = &LittleFS; else if (sdOK && SD.exists(p)) fs = &SD; }
   else { if (sdOK && SD.exists(p)) fs = &SD; else if (flashOK && LittleFS.exists(p)) fs = &LittleFS; }
   if (!fs) { sendErr(404, "No such document"); return; }
   File f = fs->open(p, FILE_READ);
@@ -2071,6 +2099,11 @@ void handleDocPut() {
   if (n == "checklist" || n == "oled") {
     if (flashOK) { ensureDirs(LittleFS); ok = writeDoc(LittleFS, p, body); if (ok && sdOK) { ensureDirs(SD); writeDoc(SD, p, body); } }
     else if (sdOK) { ensureDirs(SD); ok = writeDoc(SD, p, body); }
+  } else if (n.startsWith("nt/")) {      // notes: flash plus a copy on the card; card only once flash is nearly full
+    size_t freeB = flashOK ? LittleFS.totalBytes() - LittleFS.usedBytes() + fileSize(LittleFS, p.c_str()) : 0;
+    if (flashOK && freeB >= 64 * 1024) { ensureDirs(LittleFS); ok = writeDoc(LittleFS, p, body); if (ok && sdOK) { ensureDirs(SD); writeDoc(SD, p, body); } }
+    else if (sdOK) { ensureDirs(SD); ok = writeDoc(SD, p, body); if (ok && flashOK) LittleFS.remove(p); }
+    else if (flashOK) { sendErr(507, "Flash is nearly full - insert the SD card to keep saving notes"); return; }
   } else if (sdOK) {
     ensureDirs(SD); ok = writeDoc(SD, p, body);
   } else if (flashOK) {
@@ -2101,7 +2134,8 @@ void listDocs(fs::FS& fs, String& out, bool& first, const char* dir) {
 void handleDocList() {
   String s = "[";
   bool first = true;
-  const char* dir = server.arg("d") == "ics" ? "ics" : server.arg("d") == "cx" ? "cx" : "cl";
+  String d = server.arg("d");
+  const char* dir = d == "ics" ? "ics" : d == "cx" ? "cx" : d == "nt" ? "nt" : d == "na" ? "na" : "cl";
   if (sdOK) listDocs(SD, s, first, dir);
   if (flashOK) listDocs(LittleFS, s, first, dir);
   s += "]";
@@ -2141,7 +2175,7 @@ void handleDocUpload() {
 
 void handleDocDel() {
   String n = server.arg("n");
-  if (!validIcsName(n) && !validCxName(n) && !(n.startsWith("cl/") && validDocName(n))) { sendErr(400, "Only imported calendars, archived checklist days and their index can be removed"); return; }
+  if (!validIcsName(n) && !validCxName(n) && !validNoteName(n) && !(n.startsWith("cl/") && validDocName(n))) { sendErr(400, "Only imported calendars, archived checklist days, their index and note files can be removed"); return; }
   String p = docPath(n);
   bool a = sdOK && SD.exists(p) && SD.remove(p);
   bool b = flashOK && LittleFS.exists(p) && LittleFS.remove(p);
