@@ -22,7 +22,7 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 
 ## Tabs on the Dashboard
 
-Every name, place, vendor and category box suggests what you've used before: type "ada" and Tab fills in "Adafruit". A category, asset or client that doesn't exist yet can be made right there by typing its name.
+Every name, place, vendor and category box suggests as you type: "ada" and Tab fills in "Adafruit". Each one keeps a saved list (clients, vendors, locations, people, bins, categories, part numbers…): anything you save joins its list by itself, and something new can be added right from the box with "+ New". Settings › Saved lists shows every list to add to or tidy up.
 
 | | |
 |---|---|
@@ -37,7 +37,7 @@ Every name, place, vendor and category box suggests what you've used before: typ
 | **Reports** | Pick any date range. Charts of net worth, what you have, what's owed, spending by category and month, work orders, and how long the box was on and off. Save as a PDF file (no print dialog) or export CSV. |
 | **Weather** | Inside and outside temperature and humidity from small wireless sensor nodes (ESP-NOW), which you can rename. Gaps stay gaps; nothing is filled in. |
 | **Map** | Where the box has been while it had a GPS fix, each day (midnight to midnight, in the box's time zone) as its own layer, over a street, satellite or topo map. Saved spots: press the knob on the box's MAP screen to save where you are, or add them here, with notes, pin types, colours and lists; import your Google Maps places (Takeout, My Maps KML). Export GPX and KML. |
-| **Settings** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, storage, dashboard display (light or dark mode), routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. Each card stays folded until you tap it. |
+| **Settings** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, saved lists, storage, dashboard display (light or dark mode), routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. Each card stays folded until you tap it. |
 
 ### Money, the way a spreadsheet does it
 
