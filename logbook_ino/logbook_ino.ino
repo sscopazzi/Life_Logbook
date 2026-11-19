@@ -8,7 +8,7 @@
   Board : Adafruit ESP32-S2 Feather (LiPo + fuel gauge on board)
           + Adalogger FeatherWing (PCF8523 RTC + microSD, CS 10)   RTC, climate + GPS archive, log copy
           + Mini GPS PA1010D (Adafruit 4415) on I2C, 0x10           track + clock away from home
-          + 1.5" 128x128 grayscale OLED (4741, SSD1327, STEMMA QT, I2C 0x3D)   status / checklist / today / trip / join
+          + 1.5" 128x128 grayscale OLED (4741, SSD1327, STEMMA QT, I2C 0x3D)   status / checklist / today / notes / trip / join
           + piezo (1739) between pins 5 and 6                        timers, find-my-box, BNWAS
           + knob: I2C rotary encoder with push switch (5880, seesaw), STEMMA QT, 0x37 (A0 jumper closed)
             optional: its INT pad to pin 12 (set ENC_INT_PIN) so the box only reads it when it moves
@@ -40,7 +40,8 @@
     /hwo/cl/YYYY-MM-DD.json, their search index one file a month /hwo/cx/YYYY-MM.json (the dashboard
     keeps it up to date), and imported calendars /hwo/ics/<id>.json, on the SD card when there is one.
     Notes: /hwo/nt/0.json (categories) and /hwo/nt/1.json … (notes packed into files under 32 kB), in
-    flash with a copy on the card; archived notes /hwo/na/1.json … on the card (flash without one).
+    flash with a copy on the card; archived notes /hwo/na/1.json … and earlier versions /hwo/nh/1.json …
+    on the card (flash without one). Pinned notes reach the box's screen inside /hwo/doc/oled.json.
 
   EEPROM: a once-a-minute "still on" heartbeat, rotated across 240 slots for wear. After a
     power-on the box knows when it was switched off and logs the off period.
@@ -77,7 +78,9 @@
 #include <vector>
 #include <time.h>
 #include <sys/time.h>
-#include "secrets.h"
+#include <mbedtls/sha256.h>
+#define HUB_AP_SSID "Logbook"         // the starting hotspot, the same on every new box
+#define HUB_AP_PASS "logbook-setup"   // shown on the box's JOIN screen; first-boot setup makes you choose your own
 
 #define FW_VERSION "2.0"
 
@@ -85,7 +88,7 @@
 const bool  AP_ALWAYS      = true;          // keep the hotspot up even when on house Wi-Fi
 const uint8_t AP_CHANNEL   = 1;             // hotspot channel when NOT on house Wi-Fi
 const char* MDNS_NAME      = "logbook";     // http://logbook.local
-const char* TZ_POSIX       = "PST8PDT,M3.2.0,M11.1.0";   // default time zone (Pacific with DST); first-boot setup can change it
+const char* TZ_POSIX       = "UTC0";        // until first-boot setup, which starts from the phone's time zone
 const uint8_t  SD_CS          = 10;         // Adalogger FeatherWing SD chip select
 const uint8_t  EE_ADDR        = 0x50;       // I2C EEPROM address
 const uint32_t ENV_LOG_S      = 300;        // climate log interval (s), aligned to the clock
@@ -157,6 +160,7 @@ Adafruit_LC709203F gaugeLc;
 
 bool rtcOK = false, hubSht = false;
 bool timeValid = false;
+struct Sess { String h; uint32_t exp; bool keep; };   // a login: hash of its token; keep: exp in epoch s (0 = no end), else millis
 const char* timeSrc = "none";
 volatile bool ntpSynced = false;
 bool staUp = false, apUp = false;
@@ -238,15 +242,16 @@ volatile uint8_t rxHead = 0, rxTail = 0;
 portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ======================================================================
-//  Settings kept on the box (first-boot setup / Setup > Network). Defaults come from secrets.h.
+//  Settings kept on the box (first-boot setup / Setup > Network). Nothing personal is compiled in: the starting
+//  hotspot is public, and there is no default home Wi-Fi and no default box password.
 // ======================================================================
-struct Cfg { String apSsid, apPass, homeSsid, homePass, tz; bool setupDone; int contrast; bool bnwasOn; int bnwasMin; int scrOffMin; bool clHideDone; } cfg;
+struct Cfg { String apSsid, apPass, homeSsid, homePass, tz, passSalt, passHash; bool setupDone; int contrast; bool bnwasOn; int bnwasMin; int scrOffMin; bool clHideDone; } cfg;
 const char* CFG_PATH = "/hwo/config.json";
 volatile bool cfgApplyAp = false, cfgApplySta = false;
 uint32_t cfgApplyAt = 0;
 
 void cfgDefaults() {
-  cfg.apSsid = HUB_AP_SSID; cfg.apPass = HUB_AP_PASS; cfg.homeSsid = HOME_WIFI_SSID; cfg.homePass = HOME_WIFI_PASS;
+  cfg.apSsid = HUB_AP_SSID; cfg.apPass = HUB_AP_PASS; cfg.homeSsid = ""; cfg.homePass = ""; cfg.passSalt = ""; cfg.passHash = "";
   cfg.tz = TZ_POSIX; cfg.setupDone = false; cfg.contrast = 0x7F; cfg.bnwasOn = false; cfg.bnwasMin = 30; cfg.scrOffMin = 5; cfg.clHideDone = false;
 }
 void cfgLoad() {
@@ -261,11 +266,13 @@ void cfgLoad() {
   cfg.bnwasOn = d["bnwasOn"] | false; cfg.bnwasMin = constrain((int)(d["bnwasMin"] | 30), 1, 240);
   cfg.scrOffMin = constrain((int)(d["scrOffMin"] | 5), 0, 240);   // 0 = never sleeps
   cfg.clHideDone = d["clHideDone"] | false;
+  cfg.passSalt = d["passSalt"] | ""; cfg.passHash = d["passHash"] | "";
 }
 bool cfgSave() {
   JsonDocument d;
   d["apSsid"] = cfg.apSsid; d["apPass"] = cfg.apPass; d["homeSsid"] = cfg.homeSsid; d["homePass"] = cfg.homePass;
   d["tz"] = cfg.tz; d["setupDone"] = cfg.setupDone; d["contrast"] = cfg.contrast; d["bnwasOn"] = cfg.bnwasOn; d["bnwasMin"] = cfg.bnwasMin; d["scrOffMin"] = cfg.scrOffMin; d["clHideDone"] = cfg.clHideDone;
+  d["passSalt"] = cfg.passSalt; d["passHash"] = cfg.passHash;
   String out; serializeJson(d, out);
   File f = LittleFS.open("/hwo/config.tmp", FILE_WRITE);
   if (!f) return false;
@@ -273,6 +280,81 @@ bool cfgSave() {
   if (!ok) return false;
   LittleFS.remove(CFG_PATH);
   return LittleFS.rename("/hwo/config.tmp", CFG_PATH);
+}
+
+
+// ======================================================================
+//  The box password and logins
+//  The box keeps a salted SHA-256 of the password, never the password. Over the home Wi-Fi the dashboard
+//  needs a login; the browser keeps a random token in a cookie, the box keeps the token's hash. "Remember
+//  this device" keeps it for a year (in /hwo/sessions.json), otherwise until the box restarts or 12 h pass.
+//  On the hotspot no login is asked. Before a password is set, nothing is asked anywhere.
+// ======================================================================
+String sha256hex(const String& in) {
+  uint8_t h[32]; char o[65];
+  mbedtls_sha256((const unsigned char*)in.c_str(), in.length(), h, 0);
+  for (int i = 0; i < 32; i++) sprintf(o + 2 * i, "%02x", h[i]);
+  return String(o);
+}
+String randHex(int bytes) { String o; char b[3]; for (int i = 0; i < bytes; i++) { sprintf(b, "%02x", (unsigned)(esp_random() & 0xFF)); o += b; } return o; }
+bool passSet() { return cfg.passHash.length() == 64; }
+void passSetTo(const String& p) { cfg.passSalt = randHex(8); cfg.passHash = sha256hex(cfg.passSalt + p); }
+uint8_t pwFails = 0; uint32_t pwLockUntil = 0;
+bool pwCheck(const String& p) {           // true if it's the box password (or none is set yet); five misses: 30 s pause
+  if (!passSet()) return true;
+  if (pwFails >= 5 && (int32_t)(millis() - pwLockUntil) < 0) return false;
+  if (p.length() && sha256hex(cfg.passSalt + p) == cfg.passHash) { pwFails = 0; return true; }
+  if (++pwFails >= 5) pwLockUntil = millis() + 30000;
+  return false;
+}
+bool pwLocked() { return pwFails >= 5 && (int32_t)(millis() - pwLockUntil) < 0; }
+
+std::vector<Sess> sess;
+const char* SESS_PATH = "/hwo/sessions.json";
+void sessLoad() {
+  sess.clear();
+  File f = LittleFS.open(SESS_PATH, FILE_READ); if (!f) return;
+  JsonDocument d; DeserializationError e = deserializeJson(d, f); f.close();
+  if (e) return;
+  for (JsonArray x : d.as<JsonArray>()) sess.push_back({ String((const char*)(x[0] | "")), (uint32_t)(x[1] | 0UL), true });
+}
+void sessSave() {
+  JsonDocument d; JsonArray a = d.to<JsonArray>();
+  for (auto& x : sess) if (x.keep) { JsonArray r = a.add<JsonArray>(); r.add(x.h); r.add(x.exp); }
+  String o; serializeJson(d, o);
+  File f = LittleFS.open(SESS_PATH, FILE_WRITE); if (f) { f.print(o); f.close(); }
+}
+bool sessLive(const Sess& x) {
+  if (x.keep) return !x.exp || !timeValid || (uint32_t)time(nullptr) < x.exp;
+  return (int32_t)(x.exp - millis()) > 0;
+}
+String sessNew(bool keep) {
+  for (size_t i = sess.size(); i-- > 0;) if (!sessLive(sess[i])) sess.erase(sess.begin() + i);
+  while (sess.size() >= 24) sess.erase(sess.begin());
+  String t = randHex(16);
+  sess.push_back({ sha256hex(t), keep ? (timeValid ? (uint32_t)time(nullptr) + 365UL * 86400UL : 0UL) : millis() + 12UL * 3600000UL, keep });
+  if (keep) sessSave();
+  return t;
+}
+String cookieTok() {
+  String c = server.header("Cookie"); int i = c.indexOf("lb_s="); if (i < 0) return "";
+  String t = c.substring(i + 5); int e = t.indexOf(';'); if (e >= 0) t = t.substring(0, e); t.trim();
+  return t.length() == 32 ? t : String("");
+}
+int sessFind() {
+  String t = cookieTok(); if (!t.length()) return -1;
+  String h = sha256hex(t);
+  for (size_t i = 0; i < sess.size(); i++) if (sess[i].h == h) return sessLive(sess[i]) ? (int)i : -1;
+  return -1;
+}
+int sessKept() { int n = 0; for (auto& x : sess) if (x.keep) n++; return n; }
+bool viaHotspot() { return server.client().localIP() == WiFi.softAPIP(); }
+bool needLogin() { return passSet() && !viaHotspot(); }
+bool authed() { return !needLogin() || sessFind() >= 0; }
+bool gate() { if (authed()) return true; sendErr(401, "Log in"); return false; }   // every API call over the home Wi-Fi
+std::function<void()> G(std::function<void()> f) { return [f]() { if (gate()) f(); }; }
+void setCookie(const String& t, bool keep) {
+  server.sendHeader("Set-Cookie", "lb_s=" + t + "; Path=/; HttpOnly; SameSite=Strict" + (keep ? "; Max-Age=31536000" : ""));
 }
 
 // ======================================================================
@@ -310,6 +392,7 @@ String localDate(time_t t) {
   char b[12]; strftime(b, sizeof b, "%Y-%m-%d", &tm);
   return String(b);
 }
+String trackDate(time_t t) { return localDate(t); }   // a track day is a calendar day in the box's time zone
 
 // ======================================================================
 //  Storage: flash (primary) + SD (mirror / climate archive)
@@ -379,6 +462,7 @@ void ensureDirs(fs::FS& fs) {
   if (!fs.exists("/hwo/ics")) fs.mkdir("/hwo/ics");
   if (!fs.exists("/hwo/nt")) fs.mkdir("/hwo/nt");
   if (!fs.exists("/hwo/na")) fs.mkdir("/hwo/na");
+  if (!fs.exists("/hwo/nh")) fs.mkdir("/hwo/nh");
   if (!fs.exists("/gps")) fs.mkdir("/gps");
 }
 
@@ -445,6 +529,7 @@ void syncSdMirror() {
   // files kept in flash while there was no card: move them to the card
   moveDirToSd("/hwo/cl", false);
   moveDirToSd("/hwo/na", false);
+  moveDirToSd("/hwo/nh", false);
   moveDirToSd("/hwo/ics", false);
   moveDirToSd("/gps", true);       // a day's track may already be on the card: append
 }
@@ -458,6 +543,7 @@ bool startSD() {
 // Append event lines (one JSON object per line). Returns how many were written.
 int appendEvents(const String& body, String& tsOut, uint32_t& firstOut) {
   if (!store) return -1;
+  if (store == &LittleFS && LittleFS.totalBytes() - LittleFS.usedBytes() < body.length() * 2 + 16 * 1024) return -2;   // full: refuse, don't tear
   File f = store->open(LOG_PATH, FILE_APPEND);
   if (!f) return -1;
   File m;
@@ -466,7 +552,7 @@ int appendEvents(const String& body, String& tsOut, uint32_t& firstOut) {
 
   tsOut = isoLocal(time(nullptr));
   firstOut = logNextSeq;
-  int count = 0, start = 0;
+  int count = 0, start = 0; bool bad = false;
   while (start < (int)body.length()) {
     int nl = body.indexOf('\n', start);
     if (nl < 0) nl = body.length();
@@ -476,7 +562,7 @@ int appendEvents(const String& body, String& tsOut, uint32_t& firstOut) {
     line.replace("\r", " ");
     if (line.length() < 2 || line[0] != '{' || line[line.length() - 1] != '}') continue;
     String rec = "{\"seq\":" + String(logNextSeq) + ",\"ts\":\"" + tsOut + "\",\"e\":" + line + "}\n";
-    f.print(rec);
+    if (f.print(rec) != rec.length()) { bad = true; break; }
     if (mirror) m.print(rec);
     logNextSeq++;
     count++;
@@ -485,6 +571,7 @@ int appendEvents(const String& body, String& tsOut, uint32_t& firstOut) {
   logBytes = f.size();
   f.close();
   if (mirror) m.close();
+  if (bad) { scanLog(); return -2; }                     // ends a torn line and recounts
   return count;
 }
 
@@ -938,7 +1025,7 @@ void gpsLogPoint(uint32_t ep) {
   fs::FS* fs = gpsFS();
   if (!fs) return;
   if (fs == &LittleFS && LittleFS.totalBytes() - LittleFS.usedBytes() < 200 * 1024) return;   // keep room for the log
-  String day = localDate(ep);
+  String day = trackDate(ep);
   if (!fs->exists("/gps")) fs->mkdir("/gps");
   String path = "/gps/" + day + ".csv";
   bool isNew = !fs->exists(path);
@@ -1039,7 +1126,7 @@ void onStaConnected() {
 bool tryHomeWiFi(uint32_t ms) {
   WiFi.begin(cfg.homeSsid.c_str(), cfg.homePass.c_str());
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < ms) { delay(100); server.handleClient(); }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < ms) { delay(20); server.handleClient(); processRx(); screenTick(); }   // knob, button and alarms keep working
   if (WiFi.status() == WL_CONNECTED) return true;
   WiFi.disconnect(false);                  // stop retrying: retries hop channels and break the hotspot
   return false;
@@ -1112,17 +1199,19 @@ void wifiTick() {
 // ======================================================================
 //  Screen (1.5" 128x128 grayscale OLED, Adafruit 4741, SSD1327, STEMMA QT, I2C 0x3D) + knob + button
 //  + buzzer (piezo 1739)
-//  Screens: Logbook -> Checklist -> Today -> Trip -> Join.
+//  Screens: Logbook -> Checklist -> Today -> Notes -> Trip -> Join.
 //  Knob (rotary encoder 5880, 24 clicks a turn, with a push switch):
 //    turn  = move one row per click through the checklist and today's events
-//    press = tick/untick the highlighted checklist item (on the other screens: next screen); ticking an
+//    press = tick/untick the highlighted checklist item; on Notes, open the highlighted pinned note (turn to
+//            scroll it) and press again for the list; on the other screens: next screen. Ticking an
 //            item ticks what's nested under it, unticking unticks what it's nested under, as on the phone
 //    hold 1.5 s = screen off
 //  Button (lit): press = next screen. On the Logbook screen, hold it and turn the knob to set the
 //    brightness (kept on the box). Its light is full while the screen is on and glows dim while asleep.
 //  The screen goes to sleep after cfg.scrOffMin minutes with nothing touched (0 = never; set from the
 //  dashboard). When it is asleep, the first turn or press only wakes it. Alarms wake it.
-//  Without the encoder: button press = next screen, hold = tick; the screen still sleeps and wakes.
+//  Without the encoder: button press = next screen, hold = tick (or open / close a note); the screen still
+//  sleeps and wakes.
 //  Alarms: kitchen timers (several at once, set from the dashboard), find-my-box, and the BNWAS move
 //  reminder. While one is going, a press of the button or the knob silences it and does nothing else.
 //  Every press, and every turn of the knob, also restarts the BNWAS period, like the reset button on a bridge.
@@ -1152,8 +1241,13 @@ const uint16_t BUZ_HZ = 2650;                     // the piezo's loudest note
 const uint16_t HOLD_MS = 600;
 const int ROWS = 13;                              // text rows under the title bar
 
-enum { S_STATUS, S_CL, S_TODAY, S_TRIP, S_JOIN, S_COUNT };
-const char* SCR_NAME[] = { "LOGBOOK", "CHECKLIST", "TODAY", "TRIP", "JOIN" };
+enum { S_STATUS, S_CL, S_TODAY, S_NOTES, S_TRIP, S_JOIN, S_WO, S_COUNT };
+const char* SCR_KEY[] = { "status", "cl", "today", "notes", "map", "join", "wo" };   // names in the dashboard's list
+uint8_t scrOrd[S_COUNT] = { S_STATUS, S_CL, S_TODAY, S_TRIP, S_JOIN };   // until the dashboard says otherwise
+int scrN = 5;
+std::vector<String> lbKeys, mapKeys;                     // the lines on LOGBOOK and MAP (empty: the usual ones)
+String fSpd = "mph", fDist = "mi", fPos = "dd", fTemp = "F";
+uint32_t mqT0 = 0; bool mqOn = false;                     // the sliding (marquee) highlighted line
 bool oledOK = false, screenOn = false, bright = false;
 Adafruit_seesaw enc;
 bool encOK = false; uint8_t encAddr = 0;
@@ -1183,8 +1277,17 @@ uint32_t todayVer = 0xFFFFFFFF;
 String todayFor, todayNote;
 struct ExpRow { String date, name; };
 std::vector<ExpRow> expRows;
+// ---- pinned notes (in the same file, already wrapped to the screen's 21 characters) ----
+struct BoxNote { String title; std::vector<String> lines; };
+std::vector<BoxNote> boxNotes;
+int noteOpen = -1, noteListSel = 0;   // the note being read (-1: the list), and where the list was
+struct BoxWo { String no, title; std::vector<String> lines; };   // description (wrapped) then numbered steps
+std::vector<BoxWo> boxWos;
+int woOpen = -1, woListSel = 0;
 // ---- trip (today) ----
 String tripDay;
+int spotsToday = 0;
+bool boxH12 = false;                                      // header clock: 12 h if the dashboard says so
 double tripDistM = 0;
 uint32_t tripFixS = 0;
 
@@ -1297,14 +1400,42 @@ void clToggle(int row) {
 void todayLoad() {
   String d = timeValid ? localDate(time(nullptr)) : String("");
   if (todayVer == docVer && todayFor == d) return;
-  todayVer = docVer; todayFor = d; todayRows.clear(); todayNote = ""; expRows.clear();
+  todayVer = docVer; todayFor = d; todayRows.clear(); todayNote = ""; expRows.clear(); boxNotes.clear();
   const char* P = "/hwo/doc/oled.json";
   fs::FS* fs = (flashOK && LittleFS.exists(P)) ? (fs::FS*)&LittleFS : (sdOK && SD.exists(P)) ? (fs::FS*)&SD : nullptr;
   if (!fs) { todayNote = d.length() ? "Open the dashboard once" : "Clock not set yet"; return; }
   File f = fs->open(P, FILE_READ);
   JsonDocument doc; DeserializationError e = deserializeJson(doc, f); f.close();
   if (e) { todayNote = "Calendar file unreadable"; return; }
+  boxH12 = doc["h12"] | false;
+  if (doc["scr"].is<JsonArray>()) {
+    int n = 0;
+    for (const char* k : doc["scr"].as<JsonArray>()) for (int i = 0; i < S_COUNT && n < S_COUNT; i++) if (k && !strcmp(k, SCR_KEY[i])) scrOrd[n++] = i;
+    if (n) scrN = n;
+  }
+  lbKeys.clear(); mapKeys.clear(); boxWos.clear();
+  for (const char* k : doc["lb"].as<JsonArray>()) if (lbKeys.size() < 12) lbKeys.push_back(k ? k : "-");
+  for (const char* k : doc["map"].as<JsonArray>()) if (mapKeys.size() < 13) mapKeys.push_back(k ? k : "-");
+  fSpd = doc["fmt"]["spd"] | "mph"; fDist = doc["fmt"]["dist"] | "mi"; fPos = doc["fmt"]["pos"] | "dd"; fTemp = doc["fmt"]["temp"] | "F";
+  for (JsonArray x : doc["wos"].as<JsonArray>()) {
+    if (boxWos.size() >= 10) break;
+    BoxWo w; w.no = ascii(x[0] | ""); w.title = ascii(x[1] | "");
+    JsonArray xd = x[2], xs = x[3];
+    for (JsonVariant l : xd) if (w.lines.size() < 60) w.lines.push_back(fit(ascii(l | ""), 21));
+    int k = 0;
+    for (JsonVariant l : xs) { if (w.lines.size() >= 100) break; if (!k) { if (w.lines.size()) w.lines.push_back(""); w.lines.push_back("STEPS"); } w.lines.push_back(String(++k) + ". " + ascii(l | "")); }
+    boxWos.push_back(w);
+  }
+  if (woOpen >= (int)boxWos.size()) { woOpen = -1; if (scr == S_WO) sel = 0; }
   for (JsonArray x : doc["exp"].as<JsonArray>()) expRows.push_back({ String((const char*)(x[0] | "")), ascii(x[1] | "") });
+  for (JsonArray x : doc["notes"].as<JsonArray>()) {
+    if (boxNotes.size() >= 8) break;
+    BoxNote b; b.title = fit(ascii(x[0] | ""), 40);
+    JsonArray lines = x[1];
+    for (JsonVariant l : lines) { if (b.lines.size() >= 80) break; b.lines.push_back(fit(ascii(l | ""), 21)); }
+    boxNotes.push_back(b);
+  }
+  if (noteOpen >= (int)boxNotes.size()) { noteOpen = -1; if (scr == S_NOTES) sel = 0; }
   if (!d.length()) { todayNote = "Clock not set yet"; return; }
   String to = doc["to"] | "";
   if (to.length() && d > to) { todayNote = "Open the dashboard to load"; return; }
@@ -1319,7 +1450,7 @@ void todayLoad() {
 // distance and time with a fix today, from today's track file (once), then kept up as points are logged
 void tripLoad() {
   if (!timeValid) return;
-  String d = localDate(time(nullptr));
+  String d = trackDate(time(nullptr));
   if (d == tripDay) return;
   tripDay = d; tripDistM = 0; tripFixS = 0;
   String path = "/gps/" + d + ".csv";
@@ -1343,8 +1474,8 @@ void tripLoad() {
   gps.ptsDay = d; gps.ptsToday = n;
 }
 void tripAddPoint(uint32_t ep, double la, double lo) {     // called just before a point is logged
-  String d = localDate(ep);
-  if (d != tripDay) { tripDay = d; tripDistM = 0; tripFixS = 0; gps.ptsDay = d; gps.ptsToday = 0; return; }   // midnight
+  String d = trackDate(ep);
+  if (d != tripDay) { tripDay = d; tripDistM = 0; tripFixS = 0; gps.ptsDay = d; gps.ptsToday = 0; spotsToday = 0; return; }   // midnight
   if (!gps.newSeg && gps.ptEpoch && ep > gps.ptEpoch && ep - gps.ptEpoch <= 400) {
     tripDistM += distM(gps.ptLat, gps.ptLon, la, lo); tripFixS += ep - gps.ptEpoch;
   }
@@ -1443,7 +1574,13 @@ void head(const char* name) {
   oled.setTextColor(C_OFF);
   oled.setCursor(1, 1); oled.print(name);
   String tm5, r;
-  if (timeValid) { struct tm tm; time_t t = time(nullptr); localtime_r(&t, &tm); char b[8]; strftime(b, sizeof b, "%H:%M", &tm); tm5 = b; }
+  if (timeValid) {
+    todayLoad();                                         // cached: reads the file only when it changed
+    struct tm tm; time_t t = time(nullptr); localtime_r(&t, &tm); char b[8];
+    if (boxH12) snprintf(b, sizeof b, "%d:%02d%c", tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_min, tm.tm_hour < 12 ? 'a' : 'p');
+    else strftime(b, sizeof b, "%H:%M", &tm);
+    tm5 = b;
+  }
   int room = 21 - (int)strlen(name) - 1;                 // never let the clock run into the title
   r = tm5; if (battType && !isnan(battPct)) r += " " + String((int)battPct) + "%";
   if ((int)r.length() > room) r = tm5;
@@ -1468,7 +1605,7 @@ bool tempLine(const char* name, const char* lbl, String& out) {
   for (int i = 0; i < MAX_NODES; i++) {
     const Node& n = nodes[i];
     if (!n.used || strcmp(n.name, name) || isnan(n.tempC)) continue;
-    out = String(lbl) + String(n.tempC * 9.0f / 5.0f + 32.0f, 1) + "F";
+    out = String(lbl) + (fTemp == "C" ? String(n.tempC, 1) + "C" : String(n.tempC * 9.0f / 5.0f + 32.0f, 1) + "F");
     if (!isnan(n.rh)) out += " " + String((int)lroundf(n.rh)) + "%";
     if (nodeFresh(n)) return true;
     uint32_t ag = nodeAge(n);
@@ -1478,7 +1615,7 @@ bool tempLine(const char* name, const char* lbl, String& out) {
   out = String(lbl) + "--"; return true;
 }
 String clockLeft(uint32_t s) {                         // 4:32, or 1:05:00
-  char b[12];
+  char b[24];
   if (s >= 3600) snprintf(b, sizeof b, "%lu:%02lu:%02lu", (unsigned long)(s / 3600), (unsigned long)((s / 60) % 60), (unsigned long)(s % 60));
   else snprintf(b, sizeof b, "%lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
   return b;
@@ -1486,11 +1623,85 @@ String clockLeft(uint32_t s) {                         // 4:32, or 1:05:00
 // a scrolling list: the highlight moves down the screen and the list only scrolls once it reaches the
 // bottom (or top) row; each screen keeps its own scroll position
 int listTop[S_COUNT] = { 0 };
-void drawList(const std::vector<String>& L, int selRow, bool showSel) {
+int fixLen(const String& s, int mode) {   // 0: none, 1: through the first space (time, number), 2: indent + "[ ] "
+  if (mode == 1) { int k = s.indexOf(' '); return k > 0 && k < 9 ? k + 1 : 0; }
+  if (mode == 2) { int k = 0; while (k < (int)s.length() && s[k] == ' ') k++; return min(k + 4, 12); }
+  return 0;
+}
+void rowSlide(int i, const String& s, int fix) {
+  int y = 11 + i * 9, over = ((int)s.length() - 21) * 6, off = 0;
+  if (over > 0) {
+    mqOn = true;
+    uint32_t t = millis() - mqT0, run = over * 30;           // a pause, 1 px per 30 ms, a pause, again
+    if (t >= 1500 + run + 1200) mqT0 = millis(); else if (t > 1500) off = min((int)((t - 1500) / 30), over);
+  }
+  oled.fillRect(0, y - 1, 128, 9, C_ON); oled.setTextColor(C_OFF);
+  oled.setCursor(1 + 6 * fix - off, y); oled.print(s.substring(fix));
+  if (fix) { oled.fillRect(0, y - 1, 1 + 6 * fix, 9, C_ON); oled.setCursor(1, y); oled.print(s.substring(0, fix)); }
+  oled.setTextColor(C_ON);
+}
+void drawList(const std::vector<String>& L, int selRow, bool showSel, int fixMode = 0) {
   int n = L.size(); int& top = listTop[scr];
   if (showSel) { if (selRow < top) top = selRow; if (selRow > top + ROWS - 1) top = selRow - ROWS + 1; }
   top = constrain(top, 0, max(0, n - ROWS));
-  for (int i = 0; i < ROWS && top + i < n; i++) row(i, L[top + i], showSel && top + i == selRow);
+  for (int i = 0; i < ROWS && top + i < n; i++) {
+    if (showSel && top + i == selRow) rowSlide(i, L[top + i], fixLen(L[top + i], fixMode));
+    else row(i, L[top + i]);
+  }
+}
+String coord(double v, bool lat) {   // 38.12345 N  /  38 07.407'N  /  38 07'24.4"N
+  char h = lat ? (v >= 0 ? 'N' : 'S') : (v >= 0 ? 'E' : 'W'); v = fabs(v);
+  int d = (int)v; double m = (v - d) * 60;
+  char b[24];
+  if (fPos == "dm") snprintf(b, sizeof b, "%d%c %06.3f'%c", d, 248, m, h);
+  else if (fPos == "dms") snprintf(b, sizeof b, "%d%c %02d'%04.1f\"%c", d, 248, (int)m, (m - (int)m) * 60, h);
+  else snprintf(b, sizeof b, "%.5f %c", v, h);
+  return b;
+}
+String distTxt(double m) {
+  double k = fDist == "km" ? 1000.0 : fDist == "nm" ? 1852.0 : 1609.344, v = m / k;
+  return String(v, v < 10 ? 2 : 1) + " " + fDist;
+}
+// one line of LOGBOOK; col goes grey for a stale reading
+String lbLine(const String& k, uint16_t& col) {
+  col = C_ON;
+  struct tm tm; time_t t = time(nullptr); localtime_r(&t, &tm); char b[28];
+  if (k == "date") { if (!timeValid) return "Clock not set"; strftime(b, sizeof b, "%a %b %d %Y", &tm); return b; }
+  if (k == "time") { if (!timeValid) return "Clock not set"; if (boxH12) snprintf(b, sizeof b, "%d:%02d:%02d %cm", tm.tm_hour % 12 ? tm.tm_hour % 12 : 12, tm.tm_min, tm.tm_sec, tm.tm_hour < 12 ? 'a' : 'p'); else strftime(b, sizeof b, "%H:%M:%S", &tm); return b; }
+  if (k == "net") return staUp ? "WiFi home " + String(WiFi.RSSI()) + "dBm" : "Hotspot " + String(WiFi.softAPgetStationNum()) + " connected";
+  if (k == "ip") return staUp ? "IP " + WiFi.localIP().toString() : "IP " + WiFi.softAPIP().toString();
+  if (k == "gps") { bool g = gpsI2C && gps.seen && millis() - gps.lastNmeaMs < 5000; return !g ? String("GPS not found") : gps.fix ? "GPS fix " + String(gps.sats) + " sat" : "GPS no fix (" + String(gps.sats) + " sat)"; }
+  if (k == "sd") return (sdOK ? String("SD ok") : String("SD none")) + "  " + String(gps.ptsDay == tripDay ? gps.ptsToday : 0) + " pts";
+  if (k == "batt") return battType && !isnan(battPct) ? "Battery " + String((int)battPct) + "% " + String(battV, 2) + "V" : String("Battery --");
+  if (k == "volt") return !isnan(battV) ? "Battery " + String(battV, 2) + " V" : String("Battery --");
+  if (k == "left") {
+    if (isnan(battRate) || isnan(battPct)) return "Time left --";
+    if (battRate > 0.5) return "Charging +" + String(battRate, 1) + "%/h";
+    if (battRate > -0.05) return "Time left: steady";
+    float h = battPct / -battRate; return "Time left ~" + (h < 48 ? String(h, h < 10 ? 1 : 0) + " h" : String(h / 24, 1) + " d");
+  }
+  if (k == "chip") { float c = temperatureRead(); return "Box " + (fTemp == "C" ? String(c, 1) + "C" : String(c * 9 / 5 + 32, 1) + "F"); }
+  if (k == "up") { uint32_t u = millis() / 1000; snprintf(b, sizeof b, "Up %lud %02lu:%02lu", (unsigned long)(u / 86400), (unsigned long)(u / 3600 % 24), (unsigned long)(u / 60 % 60)); return b; }
+  if (k.startsWith("n:")) { int p = k.indexOf('|'); String o; if (!tempLine(k.substring(2, p < 0 ? k.length() : p).c_str(), p < 0 ? "" : k.substring(p + 1).c_str(), o)) col = C_DIM; return o; }
+  return "";
+}
+String mapLine(const String& k, uint16_t& col) {
+  bool fresh = gps.fix && millis() - gps.lastFixMs < 5000;
+  col = C_ON;
+  if (k == "spd") { if (!fresh || isnan(gps.kn)) return "Speed --"; float v = fSpd == "kn" ? gps.kn : fSpd == "kmh" ? gps.kn * 1.852f : gps.kn * 1.15078f; return "Speed " + String(v, 1) + " " + (fSpd == "kmh" ? "km/h" : fSpd); }
+  if (k == "dist") return "Dist  " + distTxt(tripDistM);
+  if (k == "fix") return "Fix   " + String(tripFixS / 3600) + "h " + String((tripFixS / 60) % 60) + "m today";
+  if (k == "pts") return "Points " + String(gps.ptsDay == tripDay ? gps.ptsToday : 0) + " today";
+  if (k == "spots") { col = C_DIM; return spotsToday ? "Spots " + String(spotsToday) + " - press=save" : String("Press: save spot"); }
+  if (k == "lat" || k == "lon" || k == "sats" || k == "alt") {
+    if (!gps.lastFixMs) return k == "lat" ? "No fix yet" : "";
+    if (!fresh) col = C_DIM;
+    if (k == "lat") return coord(gps.lat, true);
+    if (k == "lon") return coord(gps.lon, false);
+    if (k == "alt") return isnan(gps.alt) ? String("Alt --") : "Alt " + (fDist == "mi" ? String(gps.alt * 3.28084f, 0) + " ft" : String(gps.alt, 0) + " m");
+    return fresh ? "Sats " + String(gps.sats) : "last fix " + String((millis() - gps.lastFixMs) / 60000) + " min ago";
+  }
+  return "";
 }
 // big centred box over the screen for alarms
 void alarmBox(const char* title, const String& l1, const String& l2, bool inv) {
@@ -1507,19 +1718,16 @@ void alarmBox(const char* title, const String& l1, const String& l2, bool inv) {
 
 void drawScreen() {
   uint32_t now = millis();
+  { int k = 0; while (k < scrN && scrOrd[k] != scr) k++; if (k == scrN) setScreen(scrOrd[0]); }
+  mqOn = false;
   oled.clearDisplay();
   oled.setTextSize(1);
   if (scr == S_STATUS) {
     head("LOGBOOK");
-    if (timeValid) { struct tm tm; time_t t = time(nullptr); localtime_r(&t, &tm); char b[24]; strftime(b, sizeof b, "%a %b %d %Y", &tm); row(0, b); }
-    else row(0, "Clock not set");
-    row(1, staUp ? "WiFi home " + String(WiFi.RSSI()) + "dBm" : "Hotspot " + String(WiFi.softAPgetStationNum()) + " connected");
-    bool gseen = gpsI2C && gps.seen && millis() - gps.lastNmeaMs < 5000;
-    row(2, !gseen ? String("GPS not found") : gps.fix ? "GPS fix " + String(gps.sats) + " sat" : "GPS no fix (" + String(gps.sats) + " sat)");
-    row(3, (sdOK ? String("SD ok") : String("SD none")) + "  " + String(gps.ptsDay == tripDay ? gps.ptsToday : 0) + " pts");
-    String t; bool fr;
-    fr = tempLine("Inside", "In  ", t);  row(5, t, false, fr ? C_ON : C_DIM);
-    fr = tempLine("Outside", "Out ", t); row(6, t, false, fr ? C_ON : C_DIM);
+    static const char* LB0[] = { "date", "net", "gps", "sd", "-", "n:Inside|In  ", "n:Outside|Out " };
+    int nL = lbKeys.size() ? (int)lbKeys.size() : 7;
+    for (int i = 0; i < nL; i++) { uint16_t c; String l = lbLine(lbKeys.size() ? lbKeys[i] : String(LB0[i]), c); row(i, l, false, c); }
+    int aRow = nL + 1;
     // timers, BNWAS and coming expiries
     todayLoad();
     struct L { String l, r; uint16_t c; };
@@ -1532,10 +1740,11 @@ void drawScreen() {
       long d = dayNum(x.date) - dn;
       al.push_back({ "Exp " + x.name, d < 0 ? String("EXPIRED") : d == 0 ? String("today") : String(d) + "d", d <= 7 ? C_ON : C_DIM });
     }
-    if (al.size()) oled.drawFastHLine(0, 11 + 7 * 9 + 3, 128, C_DIM);
-    for (size_t i = 0; i < al.size() && i < 5; i++) {
-      if (i == 4 && al.size() > 5) { row(8 + i, "+" + String(al.size() - 4) + " more", false, C_DIM); break; }
-      rowLR(8 + i, al[i].l, al[i].r, al[i].c);
+    size_t room = max(1, ROWS - aRow);
+    if (al.size()) oled.drawFastHLine(0, 11 + (aRow - 1) * 9 + 3, 128, C_DIM);
+    for (size_t i = 0; i < al.size() && i < room; i++) {
+      if (i == room - 1 && al.size() > room) { row(aRow + i, "+" + String(al.size() - i) + " more", false, C_DIM); break; }
+      rowLR(aRow + i, al[i].l, al[i].r, al[i].c);
     }
   } else if (scr == S_CL) {
     clLoad();
@@ -1545,26 +1754,48 @@ void drawScreen() {
     else {
       std::vector<String> L;
       for (auto& r : clRows) { String ind; for (int k = 0; k < r.depth; k++) ind += " "; L.push_back(ind + (r.done ? "[x] " : "[ ] ") + r.text); }
-      drawList(L, sel, true);
+      drawList(L, sel, true, 2);
     }
   } else if (scr == S_TODAY) {
     todayLoad();
     String h = "TODAY"; if (todayFor.length()) h += " " + shortDate(todayFor);
     head(h.c_str());
     if (!todayRows.size()) row(1, todayNote);
-    else drawList(todayRows, sel, (int)todayRows.size() > ROWS);
+    else drawList(todayRows, sel, true, 1);
+  } else if (scr == S_NOTES) {
+    todayLoad();
+    if (noteOpen >= (int)boxNotes.size()) noteOpen = -1;   // the file went away or changed
+    if (noteOpen < 0) {
+      head("NOTES");
+      if (!boxNotes.size()) { row(1, "No notes here"); row(2, "Tick 'Show on the box'", false, C_DIM); row(3, "on a note", false, C_DIM); }
+      else { std::vector<String> L; for (auto& b : boxNotes) L.push_back(b.title); drawList(L, sel, true); }
+    } else {
+      BoxNote& b = boxNotes[noteOpen];
+      head(fit(b.title, 21).c_str());
+      int n = b.lines.size(), top = constrain(sel, 0, max(0, n - ROWS));
+      for (int i = 0; i < ROWS && top + i < n; i++) row(i, b.lines[top + i]);
+      if (!n) row(1, "(no text)", false, C_DIM);
+      if (n > ROWS) { int H = ROWS * 9, bh = max(6, H * ROWS / n), by = 10 + (H - bh) * top / (n - ROWS); oled.drawFastVLine(127, by, bh, C_DIM); }   // where you are in it
+    }
   } else if (scr == S_TRIP) {
-    head("TRIP TODAY");
+    head("MAP TODAY");
     tripLoad();
-    bool fresh = gps.fix && millis() - gps.lastFixMs < 5000;
-    row(0, "Speed " + (fresh && !isnan(gps.kn) ? String(gps.kn * 1.15078f, 1) + " mph" : String("--")));
-    row(1, "Dist  " + String(tripDistM / 1609.344, tripDistM < 16093 ? 2 : 1) + " mi");
-    row(2, "Fix   " + String(tripFixS / 3600) + "h " + String((tripFixS / 60) % 60) + "m today");
-    if (gps.lastFixMs) {
-      row(4, String(fabs(gps.lat), 5) + (gps.lat >= 0 ? " N" : " S"), false, fresh ? C_ON : C_DIM);
-      row(5, String(fabs(gps.lon), 5) + (gps.lon >= 0 ? " E" : " W"), false, fresh ? C_ON : C_DIM);
-      row(6, fresh ? "Sats " + String(gps.sats) : "last fix " + String((millis() - gps.lastFixMs) / 60000) + " min ago", false, fresh ? C_ON : C_DIM);
-    } else row(4, "No fix yet");
+    static const char* MP0[] = { "spd", "dist", "fix", "spots", "lat", "lon", "sats" };
+    int nM = mapKeys.size() ? (int)mapKeys.size() : 7;
+    for (int i = 0; i < nM; i++) { uint16_t c; String l = mapLine(mapKeys.size() ? mapKeys[i] : String(MP0[i]), c); row(i, l, false, c); }
+  } else if (scr == S_WO) {
+    todayLoad();
+    if (woOpen >= (int)boxWos.size()) woOpen = -1;
+    if (woOpen < 0) {
+      head(("WORK ORDERS " + String(boxWos.size())).c_str());
+      if (!boxWos.size()) { row(1, "None here"); row(2, "Tick 'Show on the box'", false, C_DIM); row(3, "on a work order", false, C_DIM); }
+      else { std::vector<String> L; for (auto& w : boxWos) L.push_back(w.no + " " + w.title); drawList(L, sel, true, 1); }
+    } else {
+      BoxWo& w = boxWos[woOpen];
+      head(fit(w.no + " " + w.title, 21).c_str());
+      if (!w.lines.size()) row(1, "(no description)", false, C_DIM);
+      else drawList(w.lines, sel, true, 1);
+    }
   } else {
     head("JOIN");
     row(0, "WiFi " + ascii(cfg.apSsid));
@@ -1583,18 +1814,30 @@ void drawScreen() {
   pushFrame();
 }
 
-int listLen() { if (scr == S_CL) { clLoad(); return clRows.size(); } if (scr == S_TODAY) { todayLoad(); return todayRows.size(); } return 0; }
+int listLen() {
+  if (scr == S_CL) { clLoad(); return clRows.size(); }
+  if (scr == S_TODAY) { todayLoad(); return todayRows.size(); }
+  if (scr == S_NOTES) { todayLoad(); if (noteOpen >= (int)boxNotes.size()) noteOpen = -1; return noteOpen >= 0 ? max(1, (int)boxNotes[noteOpen].lines.size() - ROWS + 1) : (int)boxNotes.size(); }   // reading: one step per line
+  if (scr == S_WO) { todayLoad(); if (woOpen >= (int)boxWos.size()) woOpen = -1; return woOpen >= 0 ? (int)boxWos[woOpen].lines.size() : (int)boxWos.size(); }
+  return 0;
+}
 void setScreen(int s) {   // each screen comes back where you left it
+  if (scr == S_NOTES && noteOpen >= 0) { noteOpen = -1; sel = noteListSel; }   // leaving a note goes back to the list
+  if (scr == S_WO && woOpen >= 0) { woOpen = -1; sel = woListSel; }
   selMem[scr] = sel;
-  scr = (s + S_COUNT) % S_COUNT;
+  scr = constrain(s, 0, S_COUNT - 1); mqT0 = millis();
   int n = listLen();
   sel = constrain(selMem[scr], 0, max(0, n - 1));
   redraw = true;
 }
+void nextScreen() {
+  int k = 0; while (k < scrN && scrOrd[k] != scr) k++;
+  setScreen(scrOrd[k < scrN ? (k + 1) % scrN : 0]);
+}
 void moveSel(int d) {   // one row per click of the knob, stopping at the ends
   int n = listLen(); if (n <= 0) { sel = 0; return; }
   int s2 = constrain(sel + d, 0, n - 1);
-  if (s2 != sel) { sel = s2; redraw = true; }
+  if (s2 != sel) { sel = s2; redraw = true; mqT0 = millis(); }
   selMem[scr] = sel;
   if (scr == S_CL && sel < (int)clRows.size()) clSelId = clRows[sel].id;
 }
@@ -1616,8 +1859,39 @@ bool touched(uint32_t now) {
   if (!screenOn && oledOK) { screenPower(true); return true; }
   return false;
 }
-void onShort() { if (screenOn) setScreen(scr + 1); }
-void onHold()  { if (screenOn && scr == S_CL && !encOK) clToggle(sel); }   // without the encoder, hold the button to tick
+void onShort() { if (screenOn) nextScreen(); }
+void woPress() {   // WORK ORDERS: press opens one (description, then steps), press again goes back
+  todayLoad();
+  if (woOpen >= (int)boxWos.size()) woOpen = -1;
+  if (woOpen < 0) { if (!boxWos.size()) { nextScreen(); return; } woListSel = sel; woOpen = constrain(sel, 0, (int)boxWos.size() - 1); sel = 0; listTop[S_WO] = 0; }
+  else { woOpen = -1; sel = woListSel; }
+  selMem[S_WO] = sel; mqT0 = millis(); redraw = true;
+}
+// MAP: a press saves where the box is now, as a spot on the dashboard's Map tab
+void spotSave() {
+  bool fresh = gps.fix && millis() - gps.lastFixMs < 5000;
+  if (!fresh) { msg = "No GPS fix"; msgUntil = millis() + 1500; redraw = true; return; }
+  if (!timeValid || !store) { msg = "Not saved"; msgUntil = millis() + 1500; redraw = true; return; }
+  uint32_t t = time(nullptr);
+  String ev = "{\"op\":\"spot.add\",\"id\":\"sp-" + String(t, HEX) + String(millis() % 1000) + "\",\"lat\":" + String(gps.lat, 6) + ",\"lon\":" + String(gps.lon, 6) +
+              ",\"t\":" + jStr(isoLocal(t)) + ",\"src\":\"box\"}";
+  String ts; uint32_t first;
+  if (appendEvents(ev, ts, first) == 1) { spotsToday++; msg = "Spot saved"; ledBlinkUntil = millis() + 400; }
+  else msg = "Not saved";
+  msgUntil = millis() + 1500; redraw = true;
+}
+// NOTES: press opens the highlighted note, press again goes back to the list
+void notesPress() {
+  todayLoad();
+  if (noteOpen >= (int)boxNotes.size()) noteOpen = -1;
+  if (noteOpen < 0) { if (!boxNotes.size()) { nextScreen(); return; } noteListSel = sel; noteOpen = constrain(sel, 0, (int)boxNotes.size() - 1); sel = 0; }
+  else { noteOpen = -1; sel = noteListSel; }
+  selMem[S_NOTES] = sel; redraw = true;
+}
+void onHold() {   // without the encoder, hold the button to tick (checklist) or open / close a note
+  if (!screenOn || encOK) return;
+  if (scr == S_CL) clToggle(sel); else if (scr == S_NOTES) notesPress(); else if (scr == S_TRIP) spotSave(); else if (scr == S_WO) woPress();
+}
 
 void encStart() {
   for (uint8_t a : ENC_ADDRS) if (enc.begin(a)) { encOK = true; encAddr = a; break; }
@@ -1657,7 +1931,7 @@ void encTick(uint32_t now) {
     if (d) { encSw.t0 = now; encSw.longDone = false; encSw.swallow = touched(now); }
     else {
       if (!encSw.swallow && !encSw.longDone && screenOn) {
-        if (scr == S_CL) clToggle(sel); else setScreen(scr + 1);
+        if (scr == S_CL) clToggle(sel); else if (scr == S_NOTES) notesPress(); else if (scr == S_TRIP) spotSave(); else if (scr == S_WO) woPress(); else nextScreen();
       }
       encSw.swallow = false;
     }
@@ -1702,7 +1976,7 @@ void screenTick() {
   else if (now < ledBlinkUntil) led = (now / 100) % 2 ? 255 : 0;
   ledcWrite(BTN_LED, led);
   if (!screenOn) return;
-  if (redraw || now - lastDrawMs > (alarmActive() ? 250u : 1000u)) { drawScreen(); lastDrawMs = now; redraw = false; }
+  if (redraw || now - lastDrawMs > (alarmActive() ? 250u : mqOn ? 30u : 1000u)) { drawScreen(); lastDrawMs = now; redraw = false; }
 }
 
 // ---- web: timers, find-my-box, BNWAS ----
@@ -1791,7 +2065,7 @@ input,button{font:inherit;margin:6px 0;padding:8px;width:100%;box-sizing:border-
 button{background:#3b82f6;color:#fff;border:0;border-radius:6px;cursor:pointer}#m{margin-top:12px}.mut{color:#8b95a3;font-size:13px}</style></head>
 <body><h2>Logbook update</h2><p>Pick the <b>.lbk</b> update file (dashboard + firmware in one). If this page came up instead of the
 dashboard, the box has no dashboard yet: the .lbk puts it back.</p>
-<input id="pw" type="password" placeholder="Update password"><input id="f" type="file" accept=".lbk,.bin">
+<input id="pw" type="password" placeholder="Box password (none on a new box)"><input id="f" type="file" accept=".lbk,.bin">
 <button onclick="go()">Upload</button><div id="m"></div><p class="mut">The box restarts when it's done (about 20 s).</p>
 <script>function go(){const f=document.getElementById('f').files[0];if(!f)return;
 const fd=new FormData();fd.append('firmware',f);const x=new XMLHttpRequest();
@@ -1799,6 +2073,22 @@ x.open('POST','/update?pw='+encodeURIComponent(document.getElementById('pw').val
 x.upload.onprogress=e=>{document.getElementById('m').textContent=Math.round(100*e.loaded/e.total)+'%'};
 x.onload=()=>{document.getElementById('m').textContent=x.responseText;if(x.status==200)setTimeout(()=>location.href='/',20000)};
 x.send(fd)}</script></body></html>)HTML";
+
+const char LOGIN_HTML[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Logbook</title>
+<style>body{font:15px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#14171c;color:#e6e8eb}
+.b{width:100%;max-width:360px;margin:16px;padding:26px;background:#1d2128;border:1px solid #2c323c;border-radius:14px}
+h1{font-size:22px;margin:0 0 4px}p{color:#8b95a3;font-size:13.5px;margin:0 0 16px}
+input[type=password]{font:inherit;width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #39404b;background:#14171c;color:inherit}
+label{display:flex;gap:8px;align-items:center;margin:12px 0;font-size:14px}button{font:inherit;width:100%;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;cursor:pointer}
+#m{min-height:20px;margin-top:10px;font-size:13.5px;color:#f87171}.f{text-align:center;color:#6b7480;font-size:12px;margin-top:14px}
+@media (prefers-color-scheme:light){body{background:#f2f4f7;color:#1c2128}.b{background:#fff;border-color:#dde2e8}input[type=password]{background:#fff;border-color:#c9d0d9}}</style></head>
+<body><form class="b" onsubmit="go();return false"><h1>Logbook</h1><p>You're reaching the box over your home Wi-Fi, so it asks for the box password. On the box's own hotspot it doesn't.</p>
+<input id="pw" type="password" placeholder="Box password" autocomplete="current-password" autofocus>
+<label><input id="k" type="checkbox" checked> Remember this device</label><button>Open Logbook</button><div id="m"></div><div class="f">Logbook · Aspect Wave LLC</div></form>
+<script>async function go(){const m=document.getElementById('m');m.textContent='';
+try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({pw:document.getElementById('pw').value,keep:document.getElementById('k').checked})});
+if(r.ok){location.reload();return}const j=await r.json().catch(()=>({}));m.textContent=j.err||('Error '+r.status)}catch(e){m.textContent='The box did not answer'}}</script></body></html>)HTML";
 
 const char* uiSource() {
   if (sdOK && SD.exists("/www/index.html")) return "sd";              // test override on the card
@@ -1808,6 +2098,7 @@ const char* uiSource() {
 }
 
 void handleRoot() {
+  if (!authed()) { server.sendHeader("Cache-Control", "no-store"); server.send_P(200, "text/html", LOGIN_HTML); return; }
   const char* src = uiSource();
   if (!strcmp(src, "none")) { server.send_P(200, "text/html", UPDATE_HTML); return; }   // first install: ask for the .lbk
   fs::FS& fs = !strcmp(src, "sd") ? (fs::FS&)SD : (fs::FS&)LittleFS;
@@ -1825,6 +2116,7 @@ void handleStatus() {
   s += ",\"epoch\":" + String((uint32_t)t);
   s += ",\"local\":" + jStr(isoLocal(t));
   s += ",\"tz\":" + jStr(cfg.tz) + ",\"setupDone\":" + jBool(cfg.setupDone);
+  s += ",\"passSet\":" + jBool(passSet()) + ",\"login\":" + jBool(needLogin()) + ",\"remembered\":" + String(sessKept());
   s += ",\"timeValid\":" + jBool(timeValid);
   s += ",\"timeSrc\":" + jStr(timeSrc);
   s += ",\"rtcOK\":" + jBool(rtcOK);
@@ -1858,7 +2150,7 @@ void handleStatus() {
   s += ",\"gps\":{\"seen\":" + jBool(gps.seen && millis() - gps.lastNmeaMs < 5000) + ",\"fix\":" + jBool(gps.fix) + ",\"sats\":" + String(gps.sats);
   s += ",\"kn\":" + jNum(gps.kn, 1);
   if (gps.lastFixMs) s += ",\"lat\":" + String(gps.lat, 6) + ",\"lon\":" + String(gps.lon, 6) + ",\"fixAge\":" + String((millis() - gps.lastFixMs) / 1000);
-  s += ",\"ptsToday\":" + String(gps.ptsDay == localDate(t) ? gps.ptsToday : 0) + ",\"store\":" + jStr(sdOK ? "sd" : "flash") + "}";
+  s += ",\"ptsToday\":" + String(gps.ptsDay == trackDate(t) ? gps.ptsToday : 0) + ",\"store\":" + jStr(sdOK ? "sd" : "flash") + "}";
   s += ",\"alarm\":" + alarmsJson();
   s += ",\"screen\":{\"ok\":" + jBool(oledOK) + ",\"on\":" + jBool(screenOn) + ",\"enc\":" + jBool(encOK) + ",\"encAddr\":" + String(encAddr) + ",\"offMin\":" + String(cfg.scrOffMin) + ",\"clHide\":" + jBool(cfg.clHideDone) + "}";
   s += ",\"gpsBus\":" + jBool(gpsI2C);
@@ -1901,6 +2193,7 @@ void handleLogPost() {
   if (body.length() == 0 || body.length() > 32768) { sendErr(400, "Empty or oversized body"); return; }
   String ts; uint32_t first;
   int n = appendEvents(body, ts, first);
+  if (n == -2) { sendErr(507, "The box's storage is full - nothing was saved. Insert or check the SD card, or make room in Setup."); return; }
   if (n < 0)  { sendErr(503, "Write failed"); return; }
   if (n == 0) { sendErr(400, "No valid events"); return; }
   server.send(200, "application/json",
@@ -1961,7 +2254,7 @@ void handleEnv() {
 
 void handleDownload() {
   String p = server.arg("f");
-  if (!(p.startsWith("/hwo/") || p.startsWith("/env/") || p.startsWith("/gps/")) || p.indexOf("..") >= 0) { sendErr(400, "Not allowed"); return; }
+  if (!(p.startsWith("/hwo/") || p.startsWith("/env/") || p.startsWith("/gps/")) || p.indexOf("..") >= 0 || p.startsWith("/hwo/config") || p.startsWith("/hwo/sessions")) { sendErr(400, "Not allowed"); return; }
   fs::FS* fs = nullptr;
   if (p.startsWith("/hwo/") && store && store->exists(p)) fs = store;
   else if (sdOK && SD.exists(p)) fs = &SD;
@@ -1984,7 +2277,7 @@ void handleTime() {
   setSystemUtc((time_t)e);
   writeRtc((time_t)e);
   timeValid = true;
-  if (!(timeValid && (!strcmp(timeSrc, "gps") || !strcmp(timeSrc, "ntp")))) timeSrc = "laptop";
+  timeSrc = "laptop";
   lastEnvSlot = 0;
   server.send(200, "application/json", "{\"ok\":true,\"local\":" + jStr(isoLocal((time_t)e)) + "}");
 }
@@ -2015,6 +2308,7 @@ void handleAttUpload() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     attOK = false; attBytes = 0; attErr = "";
+    if (!authed()) { attErr = "Log in"; return; }
     String id = safeName(server.arg("id"), 12);
     String fn = safeName(up.filename, 40);
     attPath = "/att/" + id + "_" + fn;
@@ -2048,8 +2342,8 @@ bool validCxName(const String& n) {   // archive search index: cx/YYYY-MM or cx/
   for (size_t i = 3; i < n.length(); i++) if (!isdigit((unsigned char)n[i]) && n[i] != '-') return false;
   return true;
 }
-bool validNoteName(const String& n) {   // notes nt/0 … nt/9999, archived notes na/1 … na/9999
-  if (!(n.startsWith("nt/") || n.startsWith("na/")) || n.length() < 4 || n.length() > 7) return false;
+bool validNoteName(const String& n) {   // notes nt/0 …, archived notes na/1 …, note history nh/1 … (up to 4 digits)
+  if (!(n.startsWith("nt/") || n.startsWith("na/") || n.startsWith("nh/")) || n.length() < 4 || n.length() > 7) return false;
   for (size_t i = 3; i < n.length(); i++) if (!isdigit((unsigned char)n[i])) return false;
   return true;
 }
@@ -2101,7 +2395,7 @@ void handleDocPut() {
     else if (sdOK) { ensureDirs(SD); ok = writeDoc(SD, p, body); }
   } else if (n.startsWith("nt/")) {      // notes: flash plus a copy on the card; card only once flash is nearly full
     size_t freeB = flashOK ? LittleFS.totalBytes() - LittleFS.usedBytes() + fileSize(LittleFS, p.c_str()) : 0;
-    if (flashOK && freeB >= 64 * 1024) { ensureDirs(LittleFS); ok = writeDoc(LittleFS, p, body); if (ok && sdOK) { ensureDirs(SD); writeDoc(SD, p, body); } }
+    if (flashOK && freeB >= 128 * 1024) { ensureDirs(LittleFS); ok = writeDoc(LittleFS, p, body); if (ok && sdOK) { ensureDirs(SD); writeDoc(SD, p, body); } }
     else if (sdOK) { ensureDirs(SD); ok = writeDoc(SD, p, body); if (ok && flashOK) LittleFS.remove(p); }
     else if (flashOK) { sendErr(507, "Flash is nearly full - insert the SD card to keep saving notes"); return; }
   } else if (sdOK) {
@@ -2135,7 +2429,7 @@ void handleDocList() {
   String s = "[";
   bool first = true;
   String d = server.arg("d");
-  const char* dir = d == "ics" ? "ics" : d == "cx" ? "cx" : d == "nt" ? "nt" : d == "na" ? "na" : "cl";
+  const char* dir = d == "ics" ? "ics" : d == "cx" ? "cx" : d == "nt" ? "nt" : d == "na" ? "na" : d == "nh" ? "nh" : "cl";
   if (sdOK) listDocs(SD, s, first, dir);
   if (flashOK) listDocs(LittleFS, s, first, dir);
   s += "]";
@@ -2149,6 +2443,7 @@ void handleDocUpload() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     upOK = false; upBytes = 0; upErr = ""; upFs = nullptr;
+    if (!authed()) { upErr = "Log in"; return; }
     String n = server.arg("n");
     if (!validIcsName(n)) { upErr = "Bad calendar name"; return; }
     upFs = sdOK ? (fs::FS*)&SD : (flashOK ? (fs::FS*)&LittleFS : nullptr);
@@ -2226,7 +2521,7 @@ File rsFile; bool rsAuth = false, rsOK = false; size_t rsBytes = 0; String rsErr
 void handleRestoreUpload() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
-    rsAuth = (server.arg("pw") == HUB_UPDATE_PASS); rsOK = false; rsBytes = 0; rsErr = "";
+    rsAuth = pwCheck(server.arg("pw")); rsOK = false; rsBytes = 0; rsErr = "";
     if (!rsAuth) { rsErr = "Wrong password"; return; }
     if (!store) { rsErr = "No storage"; return; }
     rsFile = store->open("/hwo/log.new", FILE_WRITE);
@@ -2265,13 +2560,13 @@ void handleRestoreDone() {
 void handleConfigGet() {
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", "{\"apSsid\":" + jStr(cfg.apSsid) + ",\"homeSsid\":" + jStr(cfg.homeSsid) + ",\"homeSet\":" + jBool(cfg.homePass.length() > 0) +
-              ",\"tz\":" + jStr(cfg.tz) + ",\"setupDone\":" + jBool(cfg.setupDone) + "}");
+              ",\"tz\":" + jStr(cfg.tz) + ",\"setupDone\":" + jBool(cfg.setupDone) + ",\"passSet\":" + jBool(passSet()) + ",\"apDefault\":" + jBool(cfg.apPass == HUB_AP_PASS) + "}");
 }
-// Body: JSON with any of apSsid, apPass, homeSsid, homePass, tz, setupDone. Passwords left out stay as they are.
-// Before first setup is finished no password is needed; after that the update password is.
+// Body: JSON with any of apSsid, apPass, homeSsid, homePass, tz, setupDone, newPass. Passwords left out stay as
+// they are. Until a box password exists none is needed; after that ?pw= must be the box password.
 void handleConfigPost() {
   if (!flashOK) { sendErr(503, "Flash not mounted"); return; }
-  if (cfg.setupDone && server.arg("pw") != HUB_UPDATE_PASS) { sendErr(403, "Wrong update password"); return; }
+  if (!pwCheck(server.arg("pw"))) { sendErr(pwLocked() ? 429 : 403, pwLocked() ? "Too many tries - wait 30 s" : "Wrong box password"); return; }
   JsonDocument d;
   if (deserializeJson(d, server.arg("plain"))) { sendErr(400, "Bad request"); return; }
   Cfg n = cfg;
@@ -2281,13 +2576,19 @@ void handleConfigPost() {
   if (d["homePass"].is<const char*>()) n.homePass = (const char*)d["homePass"];
   if (d["tz"].is<const char*>() && strlen(d["tz"])) n.tz = (const char*)d["tz"];
   if (d["setupDone"].is<bool>()) n.setupDone = d["setupDone"];
+  String np = d["newPass"] | "";
+  if (np.length() && (np.length() < 8 || np.length() > 64)) { sendErr(400, "Box password: 8 to 64 characters"); return; }
+  if (n.setupDone && !passSet() && !np.length()) { sendErr(400, "Choose a box password"); return; }
+  if (n.setupDone && !cfg.setupDone && n.apPass == HUB_AP_PASS) { sendErr(400, "Choose your own hotspot password (the starting one is public)"); return; }
   n.apSsid.trim(); n.homeSsid.trim();
   if (!n.apSsid.length() || n.apSsid.length() > 32) { sendErr(400, "Hotspot name: 1 to 32 characters"); return; }
   if (n.apPass.length() < 8 || n.apPass.length() > 63) { sendErr(400, "Hotspot password: 8 to 63 characters"); return; }
   if (n.homeSsid.length() > 32 || n.homePass.length() > 63) { sendErr(400, "Home Wi-Fi name or password too long"); return; }
   bool ap = n.apSsid != cfg.apSsid || n.apPass != cfg.apPass, sta = n.homeSsid != cfg.homeSsid || n.homePass != cfg.homePass;
   Cfg old = cfg; cfg = n;
+  if (np.length()) passSetTo(np);
   if (!cfgSave()) { cfg = old; sendErr(503, "Could not save"); return; }
+  if (np.length()) { sess.clear(); sessSave(); if (!viaHotspot()) setCookie(sessNew(false), false); }   // a new password signs every device out
   cfgApplyAp = ap; cfgApplySta = sta; cfgApplyAt = millis() + 1500;   // after this reply has gone out
   server.send(200, "application/json", String("{\"ok\":true,\"apChanged\":") + jBool(ap) + ",\"homeChanged\":" + jBool(sta) + "}");
 }
@@ -2306,6 +2607,42 @@ void handleScan() {
   server.send(200, "application/json", s + "]");
 }
 
+
+// ---------- login / logout / box password ----------
+void handleLogin() {
+  JsonDocument d; deserializeJson(d, server.arg("plain"));
+  if (!needLogin()) { server.send(200, "application/json", "{\"ok\":true}"); return; }
+  if (pwLocked()) { sendErr(429, "Too many tries - wait 30 s"); return; }
+  if (!pwCheck(d["pw"] | "")) { sendErr(pwLocked() ? 429 : 403, pwLocked() ? "Too many tries - wait 30 s" : "Wrong password"); return; }
+  bool keep = d["keep"] | false;
+  setCookie(sessNew(keep), keep);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleLogout() {
+  int i = sessFind();
+  if (i >= 0) { bool k = sess[i].keep; sess.erase(sess.begin() + i); if (k) sessSave(); }
+  server.sendHeader("Set-Cookie", "lb_s=; Path=/; Max-Age=0; SameSite=Strict");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handlePassword() {   // {old, new}: change it; signs every device out (this one gets a fresh login)
+  JsonDocument d; if (deserializeJson(d, server.arg("plain"))) { sendErr(400, "Bad request"); return; }
+  String np = d["new"] | "";
+  if (np.length() < 8 || np.length() > 64) { sendErr(400, "Box password: 8 to 64 characters"); return; }
+  if (!pwCheck(d["old"] | "")) { sendErr(pwLocked() ? 429 : 403, pwLocked() ? "Too many tries - wait 30 s" : "The current password is wrong"); return; }
+  String os = cfg.passSalt, oh = cfg.passHash;
+  passSetTo(np);
+  if (!cfgSave()) { cfg.passSalt = os; cfg.passHash = oh; sendErr(503, "Could not save"); return; }
+  sess.clear(); sessSave();
+  if (!viaHotspot()) setCookie(sessNew(false), false);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleForget() {     // forget every remembered device (this one stays logged in until the box restarts)
+  bool here = !viaHotspot() && sessFind() >= 0;
+  sess.clear(); sessSave();
+  if (here) setCookie(sessNew(false), false);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 bool serveAttachment(const String& uri) {
   if (!uri.startsWith("/att/") || uri.indexOf("..") >= 0) return false;
   if (!sdOK) { sendErr(503, "SD card not in — attachments live on the card"); return true; }
@@ -2318,15 +2655,15 @@ bool serveAttachment(const String& uri) {
 }
 
 void setupWeb() {
-  server.enableCORS(true);
+  // no CORS: the dashboard comes from the box itself, so other web pages open on a phone can't read the box
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/status", HTTP_GET, handleStatus);
-  server.on("/api/log", HTTP_GET, handleLogGet);
-  server.on("/api/log", HTTP_POST, handleLogPost);
-  server.on("/api/envdays", HTTP_GET, handleEnvDays);
-  server.on("/api/env", HTTP_GET, handleEnv);
-  server.on("/api/time", HTTP_POST, handleTime);
-  server.on("/dl", HTTP_GET, handleDownload);
+  server.on("/api/status", HTTP_GET, G(handleStatus));
+  server.on("/api/log", HTTP_GET, G(handleLogGet));
+  server.on("/api/log", HTTP_POST, G(handleLogPost));
+  server.on("/api/envdays", HTTP_GET, G(handleEnvDays));
+  server.on("/api/env", HTTP_GET, G(handleEnv));
+  server.on("/api/time", HTTP_POST, G(handleTime));
+  server.on("/dl", HTTP_GET, G(handleDownload));
   server.on("/update", HTTP_GET, []() { server.send_P(200, "text/html", UPDATE_HTML); });
   server.on("/update", HTTP_POST,
     []() {
@@ -2345,7 +2682,7 @@ void setupWeb() {
     []() {
       HTTPUpload& up = server.upload();
       if (up.status == UPLOAD_FILE_START) {
-        otaAuthorized = (server.arg("pw") == HUB_UPDATE_PASS);
+        otaAuthorized = pwCheck(server.arg("pw"));
         upKind = 0; upHead = ""; otaErr = ""; upUiLeft = 0; upBinSize = 0;
       } else if (up.status == UPLOAD_FILE_WRITE) {
         if (!otaAuthorized || upKind == 9) return;
@@ -2388,7 +2725,7 @@ void setupWeb() {
   server.on("/update-ui", HTTP_POST,
     []() {
       if (!flashOK)      { server.send(503, "text/plain", "Flash storage not mounted"); return; }
-      if (!uiAuthorized) { server.send(403, "text/plain", "Wrong password"); return; }
+      if (!uiAuthorized) { server.send(uiBytes ? 507 : 403, "text/plain", uiBytes ? "Flash full - dashboard not changed" : "Wrong password"); return; }
       if (uiBytes < 2000) { LittleFS.remove("/www/index.tmp"); server.send(400, "text/plain", "File too small to be the dashboard"); return; }
       LittleFS.remove("/www/index.html"); LittleFS.remove("/www/index.html.gz");
       LittleFS.rename("/www/index.tmp", "/www/index.html");
@@ -2397,14 +2734,14 @@ void setupWeb() {
     []() {
       HTTPUpload& up = server.upload();
       if (up.status == UPLOAD_FILE_START) {
-        uiAuthorized = flashOK && (server.arg("pw") == HUB_UPDATE_PASS);
+        uiAuthorized = flashOK && pwCheck(server.arg("pw"));
         uiBytes = 0;
         if (uiAuthorized) {
           if (!LittleFS.exists("/www")) LittleFS.mkdir("/www");
           uiFile = LittleFS.open("/www/index.tmp", FILE_WRITE);
         }
       } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (uiAuthorized && uiFile) { uiFile.write(up.buf, up.currentSize); uiBytes += up.currentSize; }
+        if (uiAuthorized && uiFile) { if (uiFile.write(up.buf, up.currentSize) != up.currentSize) { uiFile.close(); LittleFS.remove("/www/index.tmp"); uiAuthorized = false; } else uiBytes += up.currentSize; }
       } else if (up.status == UPLOAD_FILE_END) {
         if (uiFile) uiFile.close();
       } else if (up.status == UPLOAD_FILE_ABORTED) {
@@ -2415,34 +2752,42 @@ void setupWeb() {
     });
   server.on("/api/att", HTTP_POST,
     []() {
+      if (!gate()) return;
       if (!attOK) { sendErr(507, attErr.length() ? attErr.c_str() : "Upload failed"); return; }
       server.send(200, "application/json", "{\"ok\":true,\"path\":" + jStr(attPath) + ",\"size\":" + String(attBytes) +
                   ",\"where\":" + jStr(attWhere) + "}");
     }, handleAttUpload);
-  server.on("/api/doc", HTTP_GET, handleDocGet);
-  server.on("/api/doc", HTTP_POST, handleDocPut);
-  server.on("/api/docs", HTTP_GET, handleDocList);
+  server.on("/api/doc", HTTP_GET, G(handleDocGet));
+  server.on("/api/doc", HTTP_POST, G(handleDocPut));
+  server.on("/api/docs", HTTP_GET, G(handleDocList));
   server.on("/api/doc-up", HTTP_POST, []() {
+    if (!gate()) return;
     if (!upOK) { sendErr(507, upErr.length() ? upErr.c_str() : "Upload failed"); return; }
     docVer++;
     server.send(200, "application/json", "{\"ok\":true,\"size\":" + String(upBytes) + ",\"ver\":" + String(docVer) + "}");
   }, handleDocUpload);
-  server.on("/api/doc-del", HTTP_POST, handleDocDel);
-  server.on("/api/timers", HTTP_GET, handleTimersGet);
-  server.on("/api/timers", HTTP_POST, handleTimersPost);
-  server.on("/api/config", HTTP_GET, handleConfigGet);
-  server.on("/api/config", HTTP_POST, handleConfigPost);
-  server.on("/api/scan", HTTP_GET, handleScan);
-  server.on("/api/gpsdays", HTTP_GET, handleGpsDays);
-  server.on("/api/gps", HTTP_GET, handleGps);
+  server.on("/api/doc-del", HTTP_POST, G(handleDocDel));
+  server.on("/api/timers", HTTP_GET, G(handleTimersGet));
+  server.on("/api/timers", HTTP_POST, G(handleTimersPost));
+  server.on("/api/config", HTTP_GET, G(handleConfigGet));
+  server.on("/api/config", HTTP_POST, G(handleConfigPost));
+  server.on("/api/scan", HTTP_GET, G(handleScan));
+  server.on("/api/gpsdays", HTTP_GET, G(handleGpsDays));
+  server.on("/api/gps", HTTP_GET, G(handleGps));
   server.on("/api/restore", HTTP_POST, handleRestoreDone, handleRestoreUpload);
   server.on("/api/att-del", HTTP_POST, []() {
+    if (!gate()) return;
     String p = server.arg("f");
     if (!p.startsWith("/att/") || p.indexOf("..") >= 0) { sendErr(400, "Not allowed"); return; }
     bool a = sdOK && SD.exists(p) && SD.remove(p);
     server.send(200, "application/json", String("{\"ok\":true,\"removed\":") + jBool(a) + "}");
   });
-  server.onNotFound([]() { if (!serveAttachment(server.uri())) sendErr(404, "Not found"); });
+  server.on("/api/login", HTTP_POST, handleLogin);
+  server.on("/api/logout", HTTP_POST, handleLogout);
+  server.on("/api/password", HTTP_POST, G(handlePassword));
+  server.on("/api/forget-devices", HTTP_POST, G(handleForget));
+  server.onNotFound([]() { if (!gate()) return; if (!serveAttachment(server.uri())) sendErr(404, "Not found"); });
+  const char* hk[] = { "Cookie" }; server.collectHeaders(hk, 1);   // the login cookie
   server.begin();
 }
 
@@ -2488,7 +2833,7 @@ void setup() {
   screenStart();
 
   flashOK = startFlash();
-  if (flashOK) cfgLoad(); else cfgDefaults();
+  if (flashOK) { cfgLoad(); sessLoad(); } else cfgDefaults();
   setenv("TZ", cfg.tz.c_str(), 1); tzset();
   sdOK = startSD();
   chooseStore();
