@@ -22,6 +22,8 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 
 ## Tabs on the Dashboard
 
+Every name, place, vendor and category box suggests what you've used before: type "ada" and Tab fills in "Adafruit". A category, asset or client that doesn't exist yet can be made right there by typing its name.
+
 | | |
 |---|---|
 | **Work Orders** | Overdue, due-soon, open and recently finished work orders, with reminders for bills, credit cards, rent, expiring documents, low stock and backups. One-off, routine and business jobs, each with description, steps, findings, previous findings, parts and cost, people and time, attachments, and a full log. Tick "show on the box" and it's listed on the box's screen until it's closed. |
@@ -29,13 +31,13 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 | **Daily checklist** | Nested items you can drag to reorder. Ticking an item ticks everything under it, on the web page and on the box. Items can link to work-order steps. Archive a day, then rename, edit or delete it later. |
 | **Notes** | Anything worth keeping. Buttons for bold, headings, lists and tick boxes. Pin notes to the top, tick "box" to read a note on the box's own screen, color-code their borders, and put `#word` or `#[two words]` anywhere in a note to file it under a category. Link a note to a work order, routine, asset or calendar event and it shows there too; set a reminder and it shows on Work Orders and the calendar; send its lines to today's checklist. Archive old notes and search them later, go back to an earlier version, or save a note as a Word or PDF file. |
 | **Calendar** | Your events (multi-day and repeating), work orders, routine dates, subscriptions, bills, card due dates, rent and loan payments. Imports and exports `.ics` (Google Calendar). |
-| **Assets** | **Things** (car, water heater, HVAC… with manuals, warranties, meters and service history), **Stock** (parts you keep on the shelf: receive them, and they go into Spending once; type a part's name on a work order's Equipment tab to use one; a warning when you're down to the last one, because one is none), **Owed** (loans and IOUs both ways), **Rent & lease** (rent you pay, split or not, and rent you collect), **Balances** and **Projection** (below). |
+| **Assets** | **Assets** (car, water heater, HVAC… with manuals, warranties, meters and service history), **Stock** (parts you keep on the shelf: receive them, and they go into Spending once; type a part's name on a work order's Equipment tab to use one; a warning when you're down to the last one, because one is none), **Owed** (loans and IOUs both ways), **Rent & lease** (rent you pay, split or not, and rent you collect), **Balances** and **Projection** (below). |
 | **Expiring** | Licenses, certifications, passports and insurance, with your own reminder schedule, plus asset warranty end dates. |
 | **Purchasing** | Spending by category (amount, vendor, note; click any entry to change it), subscriptions, bills on their due day (each one lands in Spending on its due date, where you put in what you actually paid) and vendors, with every purchase from each. |
 | **Reports** | Pick any date range. Charts of net worth, what you have, what's owed, spending by category and month, work orders, and how long the box was on and off. Save as a PDF file (no print dialog) or export CSV. |
 | **Weather** | Inside and outside temperature and humidity from small wireless sensor nodes (ESP-NOW), which you can rename. Gaps stay gaps; nothing is filled in. |
 | **Map** | Where the box has been while it had a GPS fix, each day (midnight to midnight, in the box's time zone) as its own layer, over a street, satellite or topo map. Saved spots: press the knob on the box's MAP screen to save where you are, or add them here, with notes, pin types, colours and lists; import your Google Maps places (Takeout, My Maps KML). Export GPX and KML. |
-| **Setup** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, storage, light or dark mode, routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. |
+| **Settings** | Wi-Fi, clock (24 h or am/pm), box password, your business details and logo, storage, dashboard display (light or dark mode), routine groups, the routine schedule, backups and the full searchable history. Hide the tabs you don't use, put them in your own order and pick the one Logbook opens on; nothing is deleted. Choose the box's screens and their order, and the lines and units on its LOGBOOK and MAP screens. Each card stays folded until you tap it. |
 
 ### Money, the way a spreadsheet does it
 
@@ -54,7 +56,7 @@ If you give the box your home Wi-Fi, it uses that only to set its clock and to b
 
 ## Updating a box
 
-Updates are a single `.lbk` file (the dashboard and the firmware together). Upload it in **Setup › Firmware** with the box password; the box restarts and the page reloads.
+Updates are a single `.lbk` file (the dashboard and the firmware together). Upload it in **Settings › Firmware** with the box password; the box restarts and the page reloads.
 
 **All future firmware updates are 100% free** and will be released on this GitHub page.
 

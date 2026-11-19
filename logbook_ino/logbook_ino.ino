@@ -2193,7 +2193,7 @@ void handleLogPost() {
   if (body.length() == 0 || body.length() > 32768) { sendErr(400, "Empty or oversized body"); return; }
   String ts; uint32_t first;
   int n = appendEvents(body, ts, first);
-  if (n == -2) { sendErr(507, "The box's storage is full - nothing was saved. Insert or check the SD card, or make room in Setup."); return; }
+  if (n == -2) { sendErr(507, "The box's storage is full - nothing was saved. Insert or check the SD card, or make room in Settings."); return; }
   if (n < 0)  { sendErr(503, "Write failed"); return; }
   if (n == 0) { sendErr(400, "No valid events"); return; }
   server.send(200, "application/json",
