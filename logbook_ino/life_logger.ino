@@ -1,5 +1,5 @@
 /*
-  Logbook  v2.0   (was HWOT / HouseWO hub)
+  Life Logger  v2.0   (was HWOT / HouseWO hub)
   Sophie Scopazzi / Aspect Wave LLC
 
   A carry-around box: work orders, daily checklist, calendar, GPS track, house climate,
@@ -79,15 +79,15 @@
 #include <time.h>
 #include <sys/time.h>
 #include <mbedtls/sha256.h>
-#define HUB_AP_SSID "Logbook"         // the starting hotspot, the same on every new box
-#define HUB_AP_PASS "logbook-setup"   // shown on the box's JOIN screen; first-boot setup makes you choose your own
+#define HUB_AP_SSID "Life Logger"         // the starting hotspot, the same on every new box
+#define HUB_AP_PASS "lifelogger-setup"   // shown on the box's JOIN screen; first-boot setup makes you choose your own
 
 #define FW_VERSION "2.0"
 
 // ===================== USER SETTINGS =====================
 const bool  AP_ALWAYS      = true;          // keep the hotspot up even when on house Wi-Fi
 const uint8_t AP_CHANNEL   = 1;             // hotspot channel when NOT on house Wi-Fi
-const char* MDNS_NAME      = "logbook";     // http://logbook.local
+const char* MDNS_NAME      = "lifelogger";  // http://lifelogger.local
 const char* TZ_POSIX       = "UTC0";        // until first-boot setup, which starts from the phone's time zone
 const uint8_t  SD_CS          = 10;         // Adalogger FeatherWing SD chip select
 const uint8_t  EE_ADDR        = 0x50;       // I2C EEPROM address
@@ -1199,14 +1199,14 @@ void wifiTick() {
 // ======================================================================
 //  Screen (1.5" 128x128 grayscale OLED, Adafruit 4741, SSD1327, STEMMA QT, I2C 0x3D) + knob + button
 //  + buzzer (piezo 1739)
-//  Screens: Logbook -> Checklist -> Today -> Notes -> Trip -> Join.
+//  Screens: Life Logger -> Checklist -> Today -> Notes -> Trip -> Join.
 //  Knob (rotary encoder 5880, 24 clicks a turn, with a push switch):
 //    turn  = move one row per click through the checklist and today's events
 //    press = tick/untick the highlighted checklist item; on Notes, open the highlighted pinned note (turn to
 //            scroll it) and press again for the list; on the other screens: next screen. Ticking an
 //            item ticks what's nested under it, unticking unticks what it's nested under, as on the phone
 //    hold 1.5 s = screen off
-//  Button (lit): press = next screen. On the Logbook screen, hold it and turn the knob to set the
+//  Button (lit): press = next screen. On the Life Logger screen, hold it and turn the knob to set the
 //    brightness (kept on the box). Its light is full while the screen is on and glows dim while asleep.
 //  The screen goes to sleep after cfg.scrOffMin minutes with nothing touched (0 = never; set from the
 //  dashboard). When it is asleep, the first turn or press only wakes it. Alarms wake it.
@@ -1247,7 +1247,7 @@ uint8_t scrOrd[S_COUNT] = { S_STATUS, S_CL, S_TODAY, S_NOTES, S_WO, S_TRIP, S_JO
 int scrN = 7;
 std::vector<String> cardLines;                           // CARD: your business card, already fitted to 21 characters
 std::vector<uint8_t> cardLogo; int cardLogoW = 0, cardLogoH = 0;   // its logo, 4-bit grey, two pixels a byte
-std::vector<String> lbKeys, mapKeys;                     // the lines on LOGBOOK and MAP (empty: the usual ones)
+std::vector<String> lbKeys, mapKeys;                     // the lines on LIFE LOGGER and MAP (empty: the usual ones)
 String fSpd = "mph", fDist = "mi", fPos = "dd", fTemp = "F";
 uint32_t mqT0 = 0; bool mqOn = false;                     // the sliding (marquee) highlighted line
 bool oledOK = false, screenOn = false, bright = false;
@@ -1674,7 +1674,7 @@ String distTxt(double m) {
   double k = fDist == "km" ? 1000.0 : fDist == "nm" ? 1852.0 : 1609.344, v = m / k;
   return String(v, v < 10 ? 2 : 1) + " " + fDist;
 }
-// one line of LOGBOOK; col goes grey for a stale reading
+// one line of LIFE LOGGER; col goes grey for a stale reading
 String lbLine(const String& k, uint16_t& col) {
   col = C_ON;
   struct tm tm; time_t t = time(nullptr); localtime_r(&t, &tm); char b[28];
@@ -1735,7 +1735,7 @@ void drawScreen() {
   oled.clearDisplay();
   oled.setTextSize(1);
   if (scr == S_STATUS) {
-    head("LOGBOOK");
+    head("LIFE LOGGER");
     static const char* LB0[] = { "date", "net", "gps", "sd", "-", "n:Inside|In  ", "n:Outside|Out " };
     int nL = lbKeys.size() ? (int)lbKeys.size() : 7;
     for (int i = 0; i < nL; i++) { uint16_t c; String l = lbLine(lbKeys.size() ? lbKeys[i] : String(LB0[i]), c); row(i, l, false, c); }
@@ -2090,11 +2090,11 @@ void sendErr(int code, const char* msg) {
 }
 
 const char UPDATE_HTML[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Logbook update</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Life Logger update</title>
 <style>body{font:15px system-ui;margin:40px auto;max-width:480px;padding:0 16px;background:#14171c;color:#e6e8eb}
 input,button{font:inherit;margin:6px 0;padding:8px;width:100%;box-sizing:border-box}
 button{background:#3b82f6;color:#fff;border:0;border-radius:6px;cursor:pointer}#m{margin-top:12px}.mut{color:#8b95a3;font-size:13px}</style></head>
-<body><h2>Logbook update</h2><p>Pick the <b>.lbk</b> update file (dashboard + firmware in one). If this page came up instead of the
+<body><h2>Life Logger update</h2><p>Pick the <b>.lbk</b> update file (dashboard + firmware in one). If this page came up instead of the
 dashboard, the box has no dashboard yet: the .lbk puts it back.</p>
 <input id="pw" type="password" placeholder="Box password (none on a new box)"><input id="f" type="file" accept=".lbk,.bin">
 <button onclick="go()">Upload</button><div id="m"></div><p class="mut">The box restarts when it's done (about 20 s).</p>
@@ -2106,7 +2106,7 @@ x.onload=()=>{document.getElementById('m').textContent=x.responseText;if(x.statu
 x.send(fd)}</script></body></html>)HTML";
 
 const char LOGIN_HTML[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Logbook</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Life Logger</title>
 <style>body{font:15px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#14171c;color:#e6e8eb}
 .b{width:100%;max-width:360px;margin:16px;padding:26px;background:#1d2128;border:1px solid #2c323c;border-radius:14px}
 h1{font-size:22px;margin:0 0 4px}p{color:#8b95a3;font-size:13.5px;margin:0 0 16px}
@@ -2114,9 +2114,9 @@ input[type=password]{font:inherit;width:100%;box-sizing:border-box;padding:10px;
 label{display:flex;gap:8px;align-items:center;margin:12px 0;font-size:14px}button{font:inherit;width:100%;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;cursor:pointer}
 #m{min-height:20px;margin-top:10px;font-size:13.5px;color:#f87171}.f{text-align:center;color:#6b7480;font-size:12px;margin-top:14px}
 @media (prefers-color-scheme:light){body{background:#f2f4f7;color:#1c2128}.b{background:#fff;border-color:#dde2e8}input[type=password]{background:#fff;border-color:#c9d0d9}}</style></head>
-<body><form class="b" onsubmit="go();return false"><h1>Logbook</h1><p>You're reaching the box over your home Wi-Fi, so it asks for the box password. On the box's own hotspot it doesn't.</p>
+<body><form class="b" onsubmit="go();return false"><h1>Life Logger</h1><p>You're reaching the box over your home Wi-Fi, so it asks for the box password. On the box's own hotspot it doesn't.</p>
 <input id="pw" type="password" placeholder="Box password" autocomplete="current-password" autofocus>
-<label><input id="k" type="checkbox" checked> Remember this device</label><button>Open Logbook</button><div id="m"></div><div class="f">Logbook · Aspect Wave LLC</div></form>
+<label><input id="k" type="checkbox" checked> Remember this device</label><button>Open Life Logger</button><div id="m"></div><div class="f">Life Logger · Aspect Wave LLC</div></form>
 <script>async function go(){const m=document.getElementById('m');m.textContent='';
 try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({pw:document.getElementById('pw').value,keep:document.getElementById('k').checked})});
 if(r.ok){location.reload();return}const j=await r.json().catch(()=>({}));m.textContent=j.err||('Error '+r.status)}catch(e){m.textContent='The box did not answer'}}</script></body></html>)HTML";
@@ -2722,7 +2722,7 @@ void setupWeb() {
           if (upKind == 0) {
             if (d[0] == 0xE9) { upKind = 1; Update.begin(UPDATE_SIZE_UNKNOWN); }
             else if (d[0] == 'L') upKind = 2;
-            else { upKind = 9; otaErr = "Not a Logbook update file (.lbk) or firmware (.bin)"; return; }
+            else { upKind = 9; otaErr = "Not a Life Logger update file (.lbk) or firmware (.bin)"; return; }
           }
           if (upKind == 2) {
             while (n && upHead.length() < 300) { char c = *d++; n--; if (c == '\n') { upKind = 3; break; } upHead += c; }
@@ -2841,7 +2841,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   resetReason = esp_reset_reason();
-  Serial.printf("Logbook v" FW_VERSION "   reset: %s\n", resetName(resetReason));
+  Serial.printf("Life Logger v" FW_VERSION "   reset: %s\n", resetName(resetReason));
 
   setenv("TZ", TZ_POSIX, 1);       // replaced by the saved time zone once flash is mounted
   tzset();
